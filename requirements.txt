@@ -1,0 +1,2 @@
+PySide6>=6.8
+uiautomator2>=3.2
