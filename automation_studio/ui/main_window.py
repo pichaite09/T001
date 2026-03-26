@@ -6,8 +6,8 @@ from pathlib import Path
 from PySide6 import QtCore, QtWidgets
 
 from automation_studio.database import DatabaseManager
-from automation_studio.repositories import DeviceRepository, LogRepository, WorkflowRepository
-from automation_studio.services import DeviceService, LogService, WorkflowService
+from automation_studio.repositories import DeviceRepository, LogRepository, TelemetryRepository, WorkflowRepository
+from automation_studio.services import DeviceService, LogService, TelemetryService, WorkflowService
 from automation_studio.ui.pages.devices_page import DevicesPage
 from automation_studio.ui.pages.log_page import LogPage
 from automation_studio.ui.pages.workflow_page import WorkflowPage
@@ -30,14 +30,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_repository = DeviceRepository(self.db)
         self.workflow_repository = WorkflowRepository(self.db)
         self.log_repository = LogRepository(self.db)
+        self.telemetry_repository = TelemetryRepository(self.db)
 
         self.device_service = DeviceService(self.device_repository)
         self.log_service = LogService(self.log_repository)
+        self.telemetry_service = TelemetryService(self.telemetry_repository)
         self.workflow_service = WorkflowService(
             self.workflow_repository,
             self.device_repository,
             self.device_service,
             self.log_service,
+            self.telemetry_service,
         )
 
     def _build_ui(self) -> None:
@@ -78,7 +81,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stack = QtWidgets.QStackedWidget()
         self.devices_page = DevicesPage(self.device_service)
         self.workflow_page = WorkflowPage(self.workflow_service, self.device_service)
-        self.log_page = LogPage(self.log_service, self.workflow_service, self.device_service)
+        self.log_page = LogPage(
+            self.log_service,
+            self.workflow_service,
+            self.device_service,
+            self.telemetry_service,
+        )
 
         self.stack.addWidget(self.devices_page)
         self.stack.addWidget(self.workflow_page)

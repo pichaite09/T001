@@ -92,26 +92,28 @@ class WorkflowRepository:
         name: str,
         description: str,
         is_active: bool = True,
+        definition_version: int = 1,
     ) -> int:
         if workflow_id:
             with self.db.connection() as connection:
                 connection.execute(
                     """
                     UPDATE workflows
-                    SET name = ?, description = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+                    SET name = ?, description = ?, is_active = ?, definition_version = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (name, description, int(is_active), workflow_id),
+                    (name, description, int(is_active), int(definition_version), workflow_id),
                 )
             return workflow_id
 
         with self.db.connection() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO workflows (name, description, is_active)
-                VALUES (?, ?, ?)
+                INSERT INTO workflows (name, description, is_active, definition_version)
+                VALUES (?, ?, ?, ?)
                 """,
-                (name, description, int(is_active)),
+                (name, description, int(is_active), int(definition_version)),
             )
             return int(cursor.lastrowid)
 
@@ -140,6 +142,7 @@ class WorkflowRepository:
         step_type: str,
         parameters: str,
         is_enabled: bool = True,
+        schema_version: int = 1,
     ) -> int:
         if step_id:
             with self.db.connection() as connection:
@@ -147,20 +150,21 @@ class WorkflowRepository:
                     """
                     UPDATE steps
                     SET position = ?, name = ?, step_type = ?, parameters = ?, is_enabled = ?,
+                        schema_version = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (position, name, step_type, parameters, int(is_enabled), step_id),
+                    (position, name, step_type, parameters, int(is_enabled), int(schema_version), step_id),
                 )
             return step_id
 
         with self.db.connection() as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO steps (workflow_id, position, name, step_type, parameters, is_enabled)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO steps (workflow_id, position, name, step_type, parameters, is_enabled, schema_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (workflow_id, position, name, step_type, parameters, int(is_enabled)),
+                (workflow_id, position, name, step_type, parameters, int(is_enabled), int(schema_version)),
             )
             return int(cursor.lastrowid)
 
@@ -248,6 +252,105 @@ class LogRepository:
         """
         values.append(limit)
 
+        with self.db.connection() as connection:
+            rows = connection.execute(query, values).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+
+class TelemetryRepository:
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def record_step_result(
+        self,
+        workflow_id: int | None,
+        device_id: int | None,
+        step_type: str,
+        outcome: str,
+        duration_ms: int,
+        error_message: str = "",
+    ) -> None:
+        if outcome == "success":
+            counters = ("success_count", 1, "failure_count", 0, "continued_failure_count", 0, "skipped_count", 0)
+        elif outcome == "continued_failure":
+            counters = ("success_count", 0, "failure_count", 0, "continued_failure_count", 1, "skipped_count", 0)
+        elif outcome in {"skipped_failure", "skipped"}:
+            counters = ("success_count", 0, "failure_count", 0, "continued_failure_count", 0, "skipped_count", 1)
+        else:
+            counters = ("success_count", 0, "failure_count", 1, "continued_failure_count", 0, "skipped_count", 0)
+
+        with self.db.connection() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO step_telemetry (
+                    workflow_id, device_id, step_type,
+                    success_count, failure_count, continued_failure_count, skipped_count,
+                    total_duration_ms, last_error, last_run_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(workflow_id, device_id, step_type)
+                DO UPDATE SET
+                    {counters[0]} = {counters[0]} + excluded.{counters[0]},
+                    {counters[2]} = {counters[2]} + excluded.{counters[2]},
+                    {counters[4]} = {counters[4]} + excluded.{counters[4]},
+                    {counters[6]} = {counters[6]} + excluded.{counters[6]},
+                    total_duration_ms = total_duration_ms + excluded.total_duration_ms,
+                    last_error = CASE
+                        WHEN excluded.last_error <> '' THEN excluded.last_error
+                        ELSE last_error
+                    END,
+                    last_run_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    workflow_id,
+                    device_id,
+                    step_type,
+                    counters[1],
+                    counters[3],
+                    counters[5],
+                    counters[7],
+                    int(duration_ms),
+                    error_message,
+                ),
+            )
+
+    def summary(
+        self,
+        workflow_id: int | None = None,
+        device_id: int | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        values: list[Any] = []
+        if workflow_id:
+            conditions.append("step_telemetry.workflow_id = ?")
+            values.append(workflow_id)
+        if device_id:
+            conditions.append("step_telemetry.device_id = ?")
+            values.append(device_id)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"""
+            SELECT
+                step_telemetry.*,
+                workflows.name AS workflow_name,
+                devices.name AS device_name,
+                CASE
+                    WHEN (success_count + failure_count + continued_failure_count + skipped_count) = 0 THEN 0
+                    ELSE ROUND(
+                        (failure_count + continued_failure_count) * 100.0 /
+                        (success_count + failure_count + continued_failure_count + skipped_count),
+                        2
+                    )
+                END AS failure_rate
+            FROM step_telemetry
+            LEFT JOIN workflows ON workflows.id = step_telemetry.workflow_id
+            LEFT JOIN devices ON devices.id = step_telemetry.device_id
+            {where_clause}
+            ORDER BY failure_rate DESC, failure_count DESC, continued_failure_count DESC, step_type ASC
+            LIMIT ?
+        """
+        values.append(limit)
         with self.db.connection() as connection:
             rows = connection.execute(query, values).fetchall()
         return [row_to_dict(row) for row in rows]

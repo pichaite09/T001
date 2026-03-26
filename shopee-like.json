@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-03-26T21:58:14",
+  "workflow": {
+    "name": "shopee-like",
+    "description": "",
+    "is_active": true,
+    "definition_version": 2
+  },
+  "steps": [
+    {
+      "position": 1,
+      "name": "Launch App",
+      "step_type": "launch_app",
+      "parameters": {
+        "package": "com.shopee.th",
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 0.9,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 2,
+      "name": "Launch App",
+      "step_type": "wait",
+      "parameters": {
+        "seconds": 5,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 3,
+      "name": "Launch App",
+      "step_type": "wait_for_text",
+      "parameters": {
+        "text": "Live & Video",
+        "timeout": 15,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 4,
+      "name": "Launch App",
+      "step_type": "random_wait",
+      "parameters": {
+        "min_seconds": 5,
+        "max_seconds": 7,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 5,
+      "name": "Launch App",
+      "step_type": "chance_gate",
+      "parameters": {
+        "probability_percent": 5,
+        "skip_count_on_fail": 1,
+        "target_position_on_pass": 0,
+        "target_position_on_fail": 0,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0.1
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 6,
+      "name": "Launch App",
+      "step_type": "click",
+      "parameters": {
+        "description": "like vide",
+        "timeout": 10,
+        "x": 0,
+        "y": 0,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 7,
+      "name": "Launch App",
+      "step_type": "swipe",
+      "parameters": {
+        "direction": "up",
+        "scale": 0.6,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+        "margin_ratio": 0.1,
+        "x1_ratio": 0.5,
+        "y1_ratio": 0.8,
+        "x2_ratio": 0.5,
+        "y2_ratio": 0.2,
+        "x1": 540,
+        "y1": 1600,
+        "x2": 540,
+        "y2": 400,
+        "duration": 0.2,
+        "repeat": 1,
+        "pause_seconds": 0,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 8,
+      "name": "Launch App",
+      "step_type": "loop_until_elapsed",
+      "parameters": {
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "skip",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0,
+        "duration_minutes": 3,
+        "target_position": 4
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 9,
+      "name": "Launch App",
+      "step_type": "stop_app",
+      "parameters": {
+        "package": "com.shopee.th",
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    }
+  ]
+}

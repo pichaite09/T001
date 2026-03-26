@@ -8,11 +8,19 @@ from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 
 
 class LogPage(QtWidgets.QWidget):
-    def __init__(self, log_service, workflow_service, device_service, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        log_service,
+        workflow_service,
+        device_service,
+        telemetry_service,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.log_service = log_service
         self.workflow_service = workflow_service
         self.device_service = device_service
+        self.telemetry_service = telemetry_service
         self._build_ui()
         self.refresh_filters()
         self.load_logs()
@@ -39,11 +47,21 @@ class LogPage(QtWidgets.QWidget):
         self.device_filter = QtWidgets.QComboBox()
         self.status_filter = QtWidgets.QComboBox()
         self.status_filter.addItem("All Status", "all")
-        self.status_filter.addItem("Started", "started")
-        self.status_filter.addItem("Running", "running")
-        self.status_filter.addItem("Success", "success")
-        self.status_filter.addItem("Failed", "failed")
-        self.status_filter.addItem("Skipped", "skipped")
+        for label, value in (
+            ("Workflow Started", "workflow_started"),
+            ("Workflow Success", "workflow_success"),
+            ("Workflow Failed", "workflow_failed"),
+            ("Validation Failed", "validation_failed"),
+            ("Step Started", "step_started"),
+            ("Step Success", "step_success"),
+            ("Step Retry", "step_retry"),
+            ("Step Failed", "step_failed"),
+            ("Step Failed Continued", "step_failed_continued"),
+            ("Step Skipped", "step_skipped"),
+            ("Condition Skipped", "step_condition_skipped"),
+            ("Step Skipped Failure", "step_skipped_failure"),
+        ):
+            self.status_filter.addItem(label, value)
         self.refresh_button = make_button("Refresh", "secondary")
 
         filters.addWidget(self._labeled_field("Workflow", self.workflow_filter))
@@ -61,6 +79,20 @@ class LogPage(QtWidgets.QWidget):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
         card_layout.addWidget(self.table)
+
+        telemetry_title = QtWidgets.QLabel("Step Telemetry")
+        telemetry_title.setObjectName("subtitleLabel")
+        card_layout.addWidget(telemetry_title)
+
+        self.telemetry_table = QtWidgets.QTableWidget(0, 8)
+        self.telemetry_table.setHorizontalHeaderLabels(
+            ["Step Type", "Workflow", "Device", "Success", "Failure", "Continued", "Skipped", "Failure %"]
+        )
+        self.telemetry_table.verticalHeader().setVisible(False)
+        self.telemetry_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.telemetry_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.telemetry_table.horizontalHeader().setStretchLastSection(True)
+        card_layout.addWidget(self.telemetry_table)
         root_layout.addWidget(card, 1)
 
         self.refresh_button.clicked.connect(self.load_logs)
@@ -107,7 +139,10 @@ class LogPage(QtWidgets.QWidget):
         )
         self.table.setRowCount(len(logs))
         for row_index, log in enumerate(logs):
-            metadata_text = json.dumps(json.loads(log["metadata"]), ensure_ascii=False)
+            try:
+                metadata_text = json.dumps(json.loads(log["metadata"]), indent=2, ensure_ascii=False)
+            except Exception:
+                metadata_text = str(log["metadata"])
             values = [
                 log["created_at"],
                 log["level"],
@@ -120,3 +155,24 @@ class LogPage(QtWidgets.QWidget):
             for column, value in enumerate(values):
                 self.table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
         self.table.resizeColumnsToContents()
+
+        telemetry_rows = self.telemetry_service.summary(
+            workflow_id=self.workflow_filter.currentData(),
+            device_id=self.device_filter.currentData(),
+            limit=10,
+        )
+        self.telemetry_table.setRowCount(len(telemetry_rows))
+        for row_index, telemetry in enumerate(telemetry_rows):
+            values = [
+                telemetry["step_type"],
+                telemetry.get("workflow_name") or "-",
+                telemetry.get("device_name") or "-",
+                telemetry["success_count"],
+                telemetry["failure_count"],
+                telemetry["continued_failure_count"],
+                telemetry["skipped_count"],
+                telemetry["failure_rate"],
+            ]
+            for column, value in enumerate(values):
+                self.telemetry_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self.telemetry_table.resizeColumnsToContents()

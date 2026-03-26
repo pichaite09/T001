@@ -4,7 +4,8 @@ import json
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from automation_studio.models import STEP_DEFINITIONS, STEP_DEFINITION_MAP
+from automation_studio.models import definition_for
+from automation_studio.ui.step_editor import StepEditorDialog
 from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 
 
@@ -22,142 +23,12 @@ class WorkflowRunner(QtCore.QThread):
         self.result_ready.emit(result)
 
 
-class StepEditorDialog(QtWidgets.QDialog):
-    def __init__(
-        self,
-        parent: QtWidgets.QWidget | None = None,
-        step_data: dict | None = None,
-        default_position: int = 1,
-    ) -> None:
-        super().__init__(parent)
-        self.step_data = step_data
-        self.setWindowTitle("Step Editor")
-        self.setModal(True)
-        self.resize(760, 620)
-        self._build_ui()
-        self._load_data(default_position)
-
-    def _build_ui(self) -> None:
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QtWidgets.QLabel("Step Editor")
-        title.setObjectName("titleLabel")
-        subtitle = QtWidgets.QLabel("แก้ไขรายละเอียด step ใน popup เพื่อให้หน้า workflow มีพื้นที่มากขึ้น")
-        subtitle.setObjectName("subtitleLabel")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-
-        grid = QtWidgets.QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(10)
-
-        grid.addWidget(make_form_label("Position"), 0, 0)
-        self.step_position_input = QtWidgets.QSpinBox()
-        self.step_position_input.setMinimum(1)
-        self.step_position_input.setMaximum(999)
-        grid.addWidget(self.step_position_input, 0, 1)
-
-        grid.addWidget(make_form_label("Name"), 1, 0)
-        self.step_name_input = QtWidgets.QLineEdit()
-        grid.addWidget(self.step_name_input, 1, 1)
-
-        grid.addWidget(make_form_label("Step Type"), 2, 0)
-        self.step_type_combo = QtWidgets.QComboBox()
-        for definition in STEP_DEFINITIONS:
-            self.step_type_combo.addItem(f"{definition.label} ({definition.key})", definition.key)
-        grid.addWidget(self.step_type_combo, 2, 1)
-        layout.addLayout(grid)
-
-        options_row = QtWidgets.QHBoxLayout()
-        self.template_button = make_button("Apply Template", "secondary")
-        self.step_enabled_check = QtWidgets.QCheckBox("Enabled")
-        self.step_enabled_check.setChecked(True)
-        options_row.addWidget(self.template_button)
-        options_row.addWidget(self.step_enabled_check)
-        options_row.addStretch(1)
-        layout.addLayout(options_row)
-
-        layout.addWidget(make_form_label("Parameters (JSON)"))
-        self.parameters_input = QtWidgets.QPlainTextEdit()
-        self.parameters_input.setPlaceholderText('{\n  "text": "Login"\n}')
-        self.parameters_input.setMinimumHeight(260)
-        layout.addWidget(self.parameters_input, 1)
-
-        self.step_hint_label = QtWidgets.QLabel()
-        self.step_hint_label.setObjectName("subtitleLabel")
-        self.step_hint_label.setWordWrap(True)
-        layout.addWidget(self.step_hint_label)
-
-        actions = QtWidgets.QHBoxLayout()
-        self.cancel_button = make_button("Cancel", "secondary")
-        self.save_button = make_button("Save Step")
-        actions.addStretch(1)
-        actions.addWidget(self.cancel_button)
-        actions.addWidget(self.save_button)
-        layout.addLayout(actions)
-
-        self.template_button.clicked.connect(self.apply_step_template)
-        self.step_type_combo.currentIndexChanged.connect(self._on_step_type_changed)
-        self.cancel_button.clicked.connect(self.reject)
-        self.save_button.clicked.connect(self._validate_and_accept)
-
-    def _load_data(self, default_position: int) -> None:
-        if self.step_data:
-            self.step_position_input.setValue(int(self.step_data["position"]))
-            self.step_name_input.setText(self.step_data["name"])
-            index = self.step_type_combo.findData(self.step_data["step_type"])
-            if index >= 0:
-                self.step_type_combo.setCurrentIndex(index)
-            self.parameters_input.setPlainText(self.step_data["parameters"])
-            self.step_enabled_check.setChecked(bool(self.step_data["is_enabled"]))
-        else:
-            self.step_position_input.setValue(default_position)
-            self.step_enabled_check.setChecked(True)
-            self.apply_step_template(force=True)
-        self._update_step_hint()
-
-    def _on_step_type_changed(self) -> None:
-        self._update_step_hint()
-        if not self.step_data and not self.step_name_input.text().strip():
-            self.step_name_input.setText(STEP_DEFINITION_MAP[self.step_type_combo.currentData()].label)
-
-    def _update_step_hint(self) -> None:
-        definition = STEP_DEFINITION_MAP[self.step_type_combo.currentData()]
-        self.step_hint_label.setText(f"{definition.description}\nSuggested JSON: {definition.template_json()}")
-
-    def apply_step_template(self, force: bool = False) -> None:
-        definition = STEP_DEFINITION_MAP[self.step_type_combo.currentData()]
-        self.parameters_input.setPlainText(definition.template_json())
-        if force or not self.step_name_input.text().strip():
-            self.step_name_input.setText(definition.label)
-        self._update_step_hint()
-
-    def _validate_and_accept(self) -> None:
-        if not self.step_name_input.text().strip():
-            QtWidgets.QMessageBox.warning(self, "Missing name", "กรุณากรอกชื่อ step")
-            return
-        try:
-            json.loads(self.parameters_input.toPlainText().strip() or "{}")
-        except json.JSONDecodeError as exc:
-            QtWidgets.QMessageBox.warning(self, "Invalid JSON", str(exc))
-            return
-        self.accept()
-
-    def payload(self) -> dict:
-        return {
-            "position": self.step_position_input.value(),
-            "name": self.step_name_input.text().strip(),
-            "step_type": self.step_type_combo.currentData(),
-            "parameters": self.parameters_input.toPlainText().strip() or "{}",
-            "is_enabled": self.step_enabled_check.isChecked(),
-        }
-
-
 class ReorderableStepTable(QtWidgets.QTableWidget):
     order_changed = QtCore.Signal(list, int)
     MIME_TYPE = "application/x-automation-studio-step-row"
+    ID_COLUMN = 0
+    DRAG_COLUMN = 1
+    POSITION_COLUMN = 2
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -285,12 +156,12 @@ class ReorderableStepTable(QtWidgets.QTableWidget):
 
     def _refresh_position_column(self) -> None:
         for row in range(self.rowCount()):
-            item = self.item(row, 1)
+            item = self.item(row, self.POSITION_COLUMN)
             if item:
                 item.setText(str(row + 1))
 
     def _step_id_at_row(self, row: int) -> int:
-        return int(self.item(row, 0).text())
+        return int(self.item(row, self.ID_COLUMN).text())
 
 
 class WorkflowPage(QtWidgets.QWidget):
@@ -303,6 +174,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.device_service = device_service
         self.current_workflow_id: int | None = None
         self.current_step_id: int | None = None
+        self.current_steps: list[dict] = []
         self.runner: WorkflowRunner | None = None
         self._build_ui()
         self.refresh_devices()
@@ -317,8 +189,11 @@ class WorkflowPage(QtWidgets.QWidget):
         title_box = QtWidgets.QVBoxLayout()
         title = QtWidgets.QLabel("Workflow")
         title.setObjectName("titleLabel")
-        subtitle = QtWidgets.QLabel("สร้าง flow การ automation, แก้ไข step แบบ popup และสั่งรันกับอุปกรณ์ที่เลือก")
+        subtitle = QtWidgets.QLabel("Phase 1 editor: form-based step editing, preset, preview และจัดการ step ได้ครบในหน้าเดียว")
         subtitle.setObjectName("subtitleLabel")
+        subtitle.setText(
+            "Phase 3 editor with presets, flow control, variables, conditional jump, and workflow JSON import/export."
+        )
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
@@ -337,9 +212,13 @@ class WorkflowPage(QtWidgets.QWidget):
         workflow_actions = QtWidgets.QHBoxLayout()
         self.workflow_new_button = make_button("New", "secondary")
         self.workflow_save_button = make_button("Save Workflow")
+        self.workflow_export_button = make_button("Export JSON", "secondary")
+        self.workflow_import_button = make_button("Import JSON", "secondary")
         self.workflow_delete_button = make_button("Delete", "danger")
         workflow_actions.addWidget(self.workflow_new_button)
         workflow_actions.addWidget(self.workflow_save_button)
+        workflow_actions.addWidget(self.workflow_export_button)
+        workflow_actions.addWidget(self.workflow_import_button)
         workflow_actions.addWidget(self.workflow_delete_button)
         workflow_layout.addLayout(workflow_actions)
 
@@ -372,11 +251,15 @@ class WorkflowPage(QtWidgets.QWidget):
 
         step_toolbar = QtWidgets.QHBoxLayout()
         self.add_step_button = make_button("Add Step")
+        self.duplicate_step_button = make_button("Duplicate", "secondary")
+        self.toggle_step_button = make_button("Disable Selected", "secondary")
         self.move_up_button = make_button("Move Up", "secondary")
         self.move_down_button = make_button("Move Down", "secondary")
         self.edit_step_button = make_button("Edit Selected", "secondary")
         self.delete_step_button = make_button("Delete Step", "danger")
         step_toolbar.addWidget(self.add_step_button)
+        step_toolbar.addWidget(self.duplicate_step_button)
+        step_toolbar.addWidget(self.toggle_step_button)
         step_toolbar.addWidget(self.move_up_button)
         step_toolbar.addWidget(self.move_down_button)
         step_toolbar.addWidget(self.edit_step_button)
@@ -385,19 +268,22 @@ class WorkflowPage(QtWidgets.QWidget):
         steps_layout.addLayout(step_toolbar)
 
         self.steps_table = ReorderableStepTable()
-        self.steps_table.setColumnCount(5)
-        self.steps_table.setHorizontalHeaderLabels(["ID", "Pos", "Name", "Type", "Parameters"])
+        self.steps_table.setColumnCount(7)
+        self.steps_table.setHorizontalHeaderLabels(["ID", "Drag", "Pos", "Name", "Type", "State", "Parameters"])
         self.steps_table.verticalHeader().setVisible(False)
         self.steps_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.steps_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.steps_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.steps_table.horizontalHeader().setStretchLastSection(True)
-        self.steps_table.setColumnHidden(0, True)
+        self.steps_table.setColumnHidden(ReorderableStepTable.ID_COLUMN, True)
         self.steps_table.setAlternatingRowColors(True)
         steps_layout.addWidget(self.steps_table, 1)
 
-        hint = QtWidgets.QLabel("ลากแถวเพื่อจัดลำดับได้ หรือใช้ Move Up / Move Down เป็นทางสำรอง")
+        hint = QtWidgets.QLabel("ลากจากคอลัมน์ Drag เพื่อจัดลำดับ, ใช้ Duplicate/Enable/Disable ได้ และ Step Editor จะสร้าง JSON ให้แบบ preview")
         hint.setObjectName("subtitleLabel")
+        hint.setText(
+            "Drag rows to reorder, use Step Editor for presets plus flow control, and import/export workflows as JSON when you want to reuse or back up step sets."
+        )
         hint.setWordWrap(True)
         steps_layout.addWidget(hint)
 
@@ -412,10 +298,14 @@ class WorkflowPage(QtWidgets.QWidget):
 
         self.workflow_new_button.clicked.connect(self.clear_workflow_form)
         self.workflow_save_button.clicked.connect(self.save_workflow)
+        self.workflow_export_button.clicked.connect(self.export_workflow_json)
+        self.workflow_import_button.clicked.connect(self.import_workflow_json)
         self.workflow_delete_button.clicked.connect(self.delete_workflow)
         self.workflow_list.itemSelectionChanged.connect(self._on_workflow_selected)
 
         self.add_step_button.clicked.connect(self.open_new_step_dialog)
+        self.duplicate_step_button.clicked.connect(self.duplicate_selected_step)
+        self.toggle_step_button.clicked.connect(self.toggle_selected_step)
         self.move_up_button.clicked.connect(self.move_selected_step_up)
         self.move_down_button.clicked.connect(self.move_selected_step_down)
         self.edit_step_button.clicked.connect(self.open_edit_step_dialog)
@@ -464,6 +354,7 @@ class WorkflowPage(QtWidgets.QWidget):
     def clear_workflow_form(self) -> None:
         self.current_workflow_id = None
         self.current_step_id = None
+        self.current_steps = []
         self.workflow_list.clearSelection()
         self.workflow_name_input.clear()
         self.workflow_description_input.clear()
@@ -490,6 +381,49 @@ class WorkflowPage(QtWidgets.QWidget):
                 self.workflow_list.setCurrentItem(item)
                 break
 
+    def export_workflow_json(self) -> None:
+        if not self.current_workflow_id:
+            QtWidgets.QMessageBox.warning(self, "Missing workflow", "Please select a workflow to export.")
+            return
+        workflow = self.workflow_service.get_workflow(self.current_workflow_id)
+        default_name = f"{workflow['name'].strip().replace(' ', '_') or 'workflow'}.json"
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Workflow JSON",
+            default_name,
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        try:
+            payload = self.workflow_service.export_workflow_definition(self.current_workflow_id)
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.run_status_label.setText("Workflow JSON exported successfully")
+
+    def import_workflow_json(self) -> None:
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import Workflow JSON",
+            "",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            workflow_id = self.workflow_service.import_workflow_definition(payload)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        self.load_workflows()
+        self._select_workflow_item(workflow_id)
+        self.run_status_label.setText("Workflow JSON imported successfully")
+
     def delete_workflow(self) -> None:
         if not self.current_workflow_id:
             return
@@ -506,53 +440,62 @@ class WorkflowPage(QtWidgets.QWidget):
 
     def load_steps(self) -> None:
         self.current_step_id = None
+        self.current_steps = []
         if not self.current_workflow_id:
             self.steps_table.setRowCount(0)
             self._sync_step_actions()
             return
-        steps = self.workflow_service.list_steps(self.current_workflow_id)
-        self.steps_table.setRowCount(len(steps))
-        for row_index, step in enumerate(steps):
-            compact_params = " ".join(step["parameters"].split())
+        self.current_steps = self.workflow_service.list_steps(self.current_workflow_id)
+        self.steps_table.setRowCount(len(self.current_steps))
+        for row_index, step in enumerate(self.current_steps):
+            compact_params = self._format_step_summary(step["parameters"])
             values = [
                 str(step["id"]),
+                ":::",
                 str(step["position"]),
                 step["name"],
-                step["step_type"],
-                compact_params[:100] + ("..." if len(compact_params) > 100 else ""),
+                definition_for(step["step_type"]).label,
+                "Enabled" if step["is_enabled"] else "Disabled",
+                compact_params,
             ]
             for column, value in enumerate(values):
-                self.steps_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(value))
+                item = QtWidgets.QTableWidgetItem(value)
+                if column == ReorderableStepTable.DRAG_COLUMN:
+                    item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                self.steps_table.setItem(row_index, column, item)
         self.steps_table.clearSelection()
         self.steps_table.resizeColumnsToContents()
         self._sync_step_actions()
 
     def _selected_step(self) -> dict | None:
-        if not self.current_workflow_id or not self.current_step_id:
+        if not self.current_step_id:
             return None
-        return next(
-            (
-                item
-                for item in self.workflow_service.list_steps(self.current_workflow_id)
-                if item["id"] == self.current_step_id
-            ),
-            None,
-        )
+        return next((item for item in self.current_steps if item["id"] == self.current_step_id), None)
 
     def _on_step_selected(self) -> None:
         row = self.steps_table.currentRow()
-        self.current_step_id = int(self.steps_table.item(row, 0).text()) if row >= 0 else None
+        self.current_step_id = (
+            int(self.steps_table.item(row, ReorderableStepTable.ID_COLUMN).text())
+            if row >= 0
+            else None
+        )
         self._sync_step_actions()
 
     def _sync_step_actions(self) -> None:
         has_workflow = self.current_workflow_id is not None
-        has_step = self.current_step_id is not None
+        step = self._selected_step()
+        has_step = step is not None
         current_row = self.steps_table.currentRow()
         self.add_step_button.setEnabled(has_workflow)
+        self.workflow_export_button.setEnabled(has_workflow)
+        self.workflow_import_button.setEnabled(True)
+        self.duplicate_step_button.setEnabled(has_step)
+        self.toggle_step_button.setEnabled(has_step)
         self.move_up_button.setEnabled(has_step and current_row > 0)
         self.move_down_button.setEnabled(has_step and 0 <= current_row < self.steps_table.rowCount() - 1)
         self.edit_step_button.setEnabled(has_step)
         self.delete_step_button.setEnabled(has_step)
+        self.toggle_step_button.setText("Disable Selected" if has_step and step["is_enabled"] else "Enable Selected")
 
     def _persist_step_order(self, ordered_step_ids: list[int], moved_step_id: int) -> None:
         if not self.current_workflow_id or not ordered_step_ids:
@@ -606,26 +549,78 @@ class WorkflowPage(QtWidgets.QWidget):
             return
 
         payload = dialog.payload()
-        step_id = self.workflow_service.save_step(
-            step["id"] if step else None,
-            self.current_workflow_id,
-            payload["position"],
-            payload["name"],
-            payload["step_type"],
-            payload["parameters"],
-            payload["is_enabled"],
-        )
+        try:
+            step_id = self.workflow_service.save_step(
+                step["id"] if step else None,
+                self.current_workflow_id,
+                int(payload["position"]),
+                str(payload["name"]),
+                str(payload["step_type"]),
+                json.dumps(payload["parameters"], ensure_ascii=False),
+                bool(payload["is_enabled"]),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save step failed", str(exc))
+            return
         self.load_steps()
         self._select_step_row(step_id)
         self.run_status_label.setText("บันทึก step เรียบร้อย")
 
     def _select_step_row(self, step_id: int) -> None:
         for row in range(self.steps_table.rowCount()):
-            if int(self.steps_table.item(row, 0).text()) == step_id:
+            if int(self.steps_table.item(row, ReorderableStepTable.ID_COLUMN).text()) == step_id:
                 self.steps_table.selectRow(row)
                 self.current_step_id = step_id
                 break
         self._sync_step_actions()
+
+    def duplicate_selected_step(self) -> None:
+        step = self._selected_step()
+        if not step:
+            return
+        try:
+            new_step_id = self.workflow_service.save_step(
+                None,
+                self.current_workflow_id,
+                int(step["position"]) + 1,
+                f"{step['name']} Copy",
+                step["step_type"],
+                step["parameters"],
+                bool(step["is_enabled"]),
+            )
+            ordered_ids = [item["id"] for item in self.current_steps]
+            insert_index = ordered_ids.index(step["id"]) + 1
+            ordered_ids.insert(insert_index, new_step_id)
+            self.workflow_service.reorder_steps(self.current_workflow_id, ordered_ids)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Duplicate failed", str(exc))
+            return
+
+        self.load_steps()
+        self._select_step_row(new_step_id)
+        self.run_status_label.setText("สร้างสำเนา step เรียบร้อย")
+
+    def toggle_selected_step(self) -> None:
+        step = self._selected_step()
+        if not step:
+            return
+        try:
+            step_id = self.workflow_service.save_step(
+                step["id"],
+                self.current_workflow_id,
+                step["position"],
+                step["name"],
+                step["step_type"],
+                step["parameters"],
+                not bool(step["is_enabled"]),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Update failed", str(exc))
+            return
+
+        self.load_steps()
+        self._select_step_row(step_id)
+        self.run_status_label.setText("อัปเดตสถานะ step เรียบร้อย")
 
     def delete_step(self) -> None:
         step = self._selected_step()
@@ -664,3 +659,22 @@ class WorkflowPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "Workflow completed", result["message"])
         else:
             QtWidgets.QMessageBox.warning(self, "Workflow failed", result["message"])
+
+    def _format_step_summary(self, parameters_text: str) -> str:
+        try:
+            parameters = json.loads(parameters_text or "{}")
+        except json.JSONDecodeError:
+            compact_params = " ".join((parameters_text or "").split())
+            return compact_params[:120] + ("..." if len(compact_params) > 120 else "")
+
+        flow_flags: list[str] = []
+        if str(parameters.get("run_if_expression", "")).strip():
+            flow_flags.append("if")
+        if int(parameters.get("repeat_times", 1) or 1) > 1:
+            flow_flags.append(f"x{int(parameters['repeat_times'])}")
+        if str(parameters.get("result_variable", "")).strip():
+            flow_flags.append(f"->{parameters['result_variable']}")
+
+        compact_params = " ".join(json.dumps(parameters, ensure_ascii=False).split())
+        compact_params = compact_params[:120] + ("..." if len(compact_params) > 120 else "")
+        return f"[{' '.join(flow_flags)}] {compact_params}" if flow_flags else compact_params
