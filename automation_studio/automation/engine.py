@@ -213,6 +213,8 @@ class WorkflowExecutor:
             "dump_hierarchy": self._dump_hierarchy,
             "assert_exists": self._assert_exists,
             "assert_text": self._assert_text,
+            "assert_state": self._assert_state,
+            "branch_on_state": self._branch_on_state,
             "set_variable": self._set_variable,
             "extract_text": self._extract_text,
             "chance_gate": self._chance_gate,
@@ -1352,6 +1354,43 @@ class WorkflowExecutor:
             raise RuntimeError(f"Text assertion failed. Expected {match_mode} '{expected_text}' but got '{actual_text}'")
         return {"selector_type": target_type, "actual_text": actual_text, "match_mode": match_mode}
 
+    def _assert_state(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        target_type, target, timeout = self._selector(parameters)
+        if not target:
+            raise RuntimeError("assert_state requires text, resource_id, xpath or description")
+        if not self._wait_on_target(target_type, target, timeout):
+            raise RuntimeError("Target not found within timeout")
+        state_name = str(parameters.get("state_name", "selected") or "selected").strip()
+        expected = bool(parameters.get("expected", True))
+        actual = self._read_target_state(target_type, target, state_name)
+        if actual is None:
+            raise RuntimeError(f"State '{state_name}' is not available on the target")
+        if actual is not expected:
+            raise RuntimeError(f"State assertion failed. Expected {state_name}={expected} but got {actual}")
+        return {"selector_type": target_type, "state_name": state_name, "expected": expected, "actual": actual}
+
+    def _branch_on_state(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        target_type, target, timeout = self._selector(parameters)
+        if not target:
+            raise RuntimeError("branch_on_state requires text, resource_id, xpath or description")
+        if not self._wait_on_target(target_type, target, timeout):
+            raise RuntimeError("Target not found within timeout")
+        state_name = str(parameters.get("state_name", "selected") or "selected").strip()
+        actual = self._read_target_state(target_type, target, state_name)
+        if actual is None:
+            raise RuntimeError(f"State '{state_name}' is not available on the target")
+        target_position_on_true = int(parameters["target_position_on_true"])
+        target_position_on_false = int(parameters["target_position_on_false"])
+        jump_to_position = target_position_on_true if actual else target_position_on_false
+        return {
+            "selector_type": target_type,
+            "state_name": state_name,
+            "actual": actual,
+            "jump_to_position": jump_to_position,
+            "target_position_on_true": target_position_on_true,
+            "target_position_on_false": target_position_on_false,
+        }
+
     def _set_variable(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         variable_name = str(parameters["variable_name"]).strip()
         value_mode = str(parameters.get("value_mode", "literal") or "literal")
@@ -1467,6 +1506,36 @@ class WorkflowExecutor:
         if source == "text":
             return info.get("text") or ""
         raise RuntimeError(f"Unsupported extract source: {source}")
+
+    def _read_target_state(self, target_type: str | None, target: Any, state_name: str) -> bool | None:
+        info = self._extract_target_info(target_type, target)
+        candidate_keys = {
+            "selected": ("selected",),
+            "checked": ("checked",),
+            "enabled": ("enabled",),
+            "focused": ("focused",),
+            "clickable": ("clickable",),
+            "scrollable": ("scrollable",),
+            "long_clickable": ("longClickable", "long_clickable"),
+        }.get(state_name, (state_name,))
+
+        for key in candidate_keys:
+            if key in info:
+                return self._coerce_bool_value(info.get(key))
+        return None
+
+    def _coerce_bool_value(self, value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        return None
 
     def _text_matches(self, actual_text: Any, expected_text: str, match_mode: str) -> bool:
         actual = "" if actual_text is None else str(actual_text)

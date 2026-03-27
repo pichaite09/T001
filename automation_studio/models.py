@@ -724,6 +724,63 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="assert_state",
+        label="Assert State",
+        description="Fail if the selected element state does not match the expected true/false value.",
+        template={"resource_id": "com.example:id/like_button", "state_name": "selected", "expected": True, "timeout": 5},
+        fields=(
+            *_selector_fields(),
+            StepField(
+                "state_name",
+                "State Name",
+                field_type="combo",
+                default="selected",
+                options=(
+                    ("selected", "Selected"),
+                    ("checked", "Checked"),
+                    ("enabled", "Enabled"),
+                    ("focused", "Focused"),
+                    ("clickable", "Clickable"),
+                    ("scrollable", "Scrollable"),
+                    ("long_clickable", "Long Clickable"),
+                ),
+            ),
+            StepField("expected", "Expected", field_type="bool", default=True),
+        ),
+    ),
+    StepDefinition(
+        key="branch_on_state",
+        label="Branch On State",
+        description="Check an element state and jump to different step positions when it is true or false.",
+        template={
+            "resource_id": "com.example:id/like_button",
+            "state_name": "selected",
+            "target_position_on_true": 10,
+            "target_position_on_false": 20,
+            "timeout": 5,
+        },
+        fields=(
+            *_selector_fields(),
+            StepField(
+                "state_name",
+                "State Name",
+                field_type="combo",
+                default="selected",
+                options=(
+                    ("selected", "Selected"),
+                    ("checked", "Checked"),
+                    ("enabled", "Enabled"),
+                    ("focused", "Focused"),
+                    ("clickable", "Clickable"),
+                    ("scrollable", "Scrollable"),
+                    ("long_clickable", "Long Clickable"),
+                ),
+            ),
+            StepField("target_position_on_true", "Target Position On True", field_type="int", default=10, required=True, min_value=1),
+            StepField("target_position_on_false", "Target Position On False", field_type="int", default=20, required=True, min_value=1),
+        ),
+    ),
+    StepDefinition(
         key="set_variable",
         label="Set Variable",
         description="Store a literal value, JSON object, template, or expression result in workflow context.",
@@ -980,7 +1037,7 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         if min_seconds is not None and max_seconds is not None and min_seconds > max_seconds:
             errors.append("Min Seconds must be less than or equal to Max Seconds")
 
-    if step_type in {"wait_for_text", "assert_exists", "wait_for_element", "assert_text", "extract_text", "scroll_to_selector"}:
+    if step_type in {"wait_for_text", "assert_exists", "wait_for_element", "assert_text", "assert_state", "branch_on_state", "extract_text", "scroll_to_selector"}:
         require_selector(definition.label)
 
     if step_type == "wait_for_element":
@@ -1050,6 +1107,24 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         match_mode = str(parameters.get("match_mode", "contains") or "contains").strip()
         if match_mode not in {"exact", "contains", "starts_with", "ends_with"}:
             errors.append("Match Mode must be exact, contains, starts_with, or ends_with")
+
+    if step_type == "assert_state":
+        state_name = str(parameters.get("state_name", "selected") or "selected").strip()
+        if state_name not in {"selected", "checked", "enabled", "focused", "clickable", "scrollable", "long_clickable"}:
+            errors.append("State Name must be selected, checked, enabled, focused, clickable, scrollable, or long_clickable")
+        if not isinstance(parameters.get("expected", True), bool):
+            errors.append("Expected must be true or false")
+
+    if step_type == "branch_on_state":
+        state_name = str(parameters.get("state_name", "selected") or "selected").strip()
+        target_position_on_true = _safe_int(parameters.get("target_position_on_true"), "Target Position On True", errors)
+        target_position_on_false = _safe_int(parameters.get("target_position_on_false"), "Target Position On False", errors)
+        if state_name not in {"selected", "checked", "enabled", "focused", "clickable", "scrollable", "long_clickable"}:
+            errors.append("State Name must be selected, checked, enabled, focused, clickable, scrollable, or long_clickable")
+        if target_position_on_true is not None and target_position_on_true < 1:
+            errors.append("Target Position On True must be greater than or equal to 1")
+        if target_position_on_false is not None and target_position_on_false < 1:
+            errors.append("Target Position On False must be greater than or equal to 1")
 
     if step_type == "set_variable":
         variable_name = str(parameters.get("variable_name", "")).strip()
@@ -1173,6 +1248,17 @@ def validate_workflow_structure(steps: list[dict[str, Any]]) -> list[str]:
             ):
                 target_position = int(parameters.get(key, 0) or 0)
                 if target_position and target_position not in positions:
+                    errors.append(
+                        f"Step {step['position']} '{step['name']}': {label} {target_position} does not exist"
+                    )
+
+        if step["step_type"] == "branch_on_state":
+            for key, label in (
+                ("target_position_on_true", "target position on true"),
+                ("target_position_on_false", "target position on false"),
+            ):
+                target_position = int(parameters.get(key, 0) or 0)
+                if target_position not in positions:
                     errors.append(
                         f"Step {step['position']} '{step['name']}': {label} {target_position} does not exist"
                     )

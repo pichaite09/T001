@@ -322,6 +322,75 @@ class EngineStepSuiteTests(unittest.TestCase):
         )
         self.assertEqual(result["actual_text"], "Success")
 
+    def test_assert_state_step(self) -> None:
+        self.device.register_selector(
+            FakeSelector(info={"selected": True}),
+            resourceId="com.ss.android.ugc.trill:id/n17",
+        )
+        result = self._execute(
+            "assert_state",
+            {
+                "resource_id": "com.ss.android.ugc.trill:id/n17",
+                "state_name": "selected",
+                "expected": True,
+                "timeout": 2,
+            },
+        )
+        self.assertTrue(result["actual"])
+        self.assertEqual(result["state_name"], "selected")
+
+    def test_assert_state_step_can_check_false(self) -> None:
+        self.device.register_selector(
+            FakeSelector(info={"selected": False}),
+            resourceId="com.ss.android.ugc.trill:id/n17",
+        )
+        result = self._execute(
+            "assert_state",
+            {
+                "resource_id": "com.ss.android.ugc.trill:id/n17",
+                "state_name": "selected",
+                "expected": False,
+                "timeout": 2,
+            },
+        )
+        self.assertFalse(result["actual"])
+
+    def test_branch_on_state_step_true_branch(self) -> None:
+        self.device.register_selector(
+            FakeSelector(info={"selected": True}),
+            resourceId="com.ss.android.ugc.trill:id/n17",
+        )
+        result = self._execute(
+            "branch_on_state",
+            {
+                "resource_id": "com.ss.android.ugc.trill:id/n17",
+                "state_name": "selected",
+                "target_position_on_true": 10,
+                "target_position_on_false": 20,
+                "timeout": 2,
+            },
+        )
+        self.assertTrue(result["actual"])
+        self.assertEqual(result["jump_to_position"], 10)
+
+    def test_branch_on_state_step_false_branch(self) -> None:
+        self.device.register_selector(
+            FakeSelector(info={"selected": False}),
+            resourceId="com.ss.android.ugc.trill:id/n17",
+        )
+        result = self._execute(
+            "branch_on_state",
+            {
+                "resource_id": "com.ss.android.ugc.trill:id/n17",
+                "state_name": "selected",
+                "target_position_on_true": 10,
+                "target_position_on_false": 20,
+                "timeout": 2,
+            },
+        )
+        self.assertFalse(result["actual"])
+        self.assertEqual(result["jump_to_position"], 20)
+
     def test_set_variable_step(self) -> None:
         runtime = self._runtime("set_variable")
         result = self.executor.execute_step(
