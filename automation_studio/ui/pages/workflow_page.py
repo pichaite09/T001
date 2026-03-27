@@ -13,18 +13,43 @@ from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 class WorkflowRunner(QtCore.QThread):
     result_ready = QtCore.Signal(dict)
 
-    def __init__(self, workflow_service, workflow_id: int, device_id: int, step_ids: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        workflow_service,
+        workflow_id: int,
+        device_id: int,
+        step_ids: list[int] | None = None,
+        device_platform_id: int | None = None,
+        account_id: int | None = None,
+        use_current_account: bool = False,
+    ) -> None:
         super().__init__()
         self.workflow_service = workflow_service
         self.workflow_id = workflow_id
         self.device_id = device_id
         self.step_ids = list(step_ids or [])
+        self.device_platform_id = device_platform_id
+        self.account_id = account_id
+        self.use_current_account = use_current_account
 
     def run(self) -> None:
         if len(self.step_ids) == 1:
-            result = self.workflow_service.execute_step(self.workflow_id, self.step_ids[0], self.device_id)
+            result = self.workflow_service.execute_step(
+                self.workflow_id,
+                self.step_ids[0],
+                self.device_id,
+                device_platform_id=self.device_platform_id,
+                account_id=self.account_id,
+                use_current_account=self.use_current_account,
+            )
         else:
-            result = self.workflow_service.execute_workflow(self.workflow_id, self.device_id)
+            result = self.workflow_service.execute_workflow(
+                self.workflow_id,
+                self.device_id,
+                device_platform_id=self.device_platform_id,
+                account_id=self.account_id,
+                use_current_account=self.use_current_account,
+            )
         self.result_ready.emit(result)
 
 
@@ -172,12 +197,21 @@ class ReorderableStepTable(QtWidgets.QTableWidget):
 class WorkflowPage(QtWidgets.QWidget):
     workflows_changed = QtCore.Signal()
     logs_changed = QtCore.Signal()
+    ACCOUNT_USE_CURRENT = "__current__"
 
-    def __init__(self, workflow_service, device_service, watcher_service, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        workflow_service,
+        device_service,
+        watcher_service,
+        account_service,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.workflow_service = workflow_service
         self.device_service = device_service
         self.watcher_service = watcher_service
+        self.account_service = account_service
         self.current_workflow_id: int | None = None
         self.current_step_id: int | None = None
         self.current_steps: list[dict] = []
@@ -273,9 +307,16 @@ class WorkflowPage(QtWidgets.QWidget):
 
         top_actions = QtWidgets.QHBoxLayout()
         self.device_combo = QtWidgets.QComboBox()
+        self.platform_combo = QtWidgets.QComboBox()
+        self.account_combo = QtWidgets.QComboBox()
+        self.device_combo.setToolTip("Select the device that will run this workflow.")
+        self.platform_combo.setToolTip("Optionally inject a platform context before the workflow starts.")
+        self.account_combo.setToolTip("Use a specific account or the platform's current account.")
         self.run_step_button = make_button("Run Selected Step", "secondary")
         self.run_button = make_button("Run Workflow")
-        top_actions.addWidget(self.device_combo, 1)
+        top_actions.addWidget(self.device_combo, 2)
+        top_actions.addWidget(self.platform_combo, 1)
+        top_actions.addWidget(self.account_combo, 1)
         top_actions.addWidget(self.run_step_button)
         top_actions.addWidget(self.run_button)
         steps_layout.addLayout(top_actions)
@@ -347,6 +388,8 @@ class WorkflowPage(QtWidgets.QWidget):
         self.steps_table.order_changed.connect(self._persist_step_order)
         self.run_step_button.clicked.connect(self.run_selected_step)
         self.run_button.clicked.connect(self.run_workflow)
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        self.platform_combo.currentIndexChanged.connect(self._on_platform_changed)
 
         self._sync_step_actions()
 
@@ -360,6 +403,55 @@ class WorkflowPage(QtWidgets.QWidget):
             index = self.device_combo.findData(current)
             if index >= 0:
                 self.device_combo.setCurrentIndex(index)
+        self.refresh_runtime_targets()
+
+    def refresh_runtime_targets(self) -> None:
+        current_platform_id = self.platform_combo.currentData()
+        current_account_data = self.account_combo.currentData()
+        device_id = self.device_combo.currentData()
+        platforms = self.account_service.list_device_platforms(int(device_id)) if device_id is not None else []
+
+        self.platform_combo.blockSignals(True)
+        self.platform_combo.clear()
+        self.platform_combo.addItem("Platform: none", None)
+        for platform in platforms:
+            current_label = f" / Current: {platform.get('current_account_name')}" if platform.get("current_account_name") else ""
+            label = f"{platform['platform_name']} ({platform['platform_key']}){current_label}"
+            self.platform_combo.addItem(label, int(platform["id"]))
+        platform_index = self.platform_combo.findData(current_platform_id)
+        self.platform_combo.setCurrentIndex(platform_index if platform_index >= 0 else 0)
+        self.platform_combo.blockSignals(False)
+
+        self._refresh_account_targets(current_account_data)
+
+    def _refresh_account_targets(self, preferred_data=None) -> None:
+        self.account_combo.blockSignals(True)
+        self.account_combo.clear()
+        device_platform_id = self.platform_combo.currentData()
+        if device_platform_id is None:
+            self.account_combo.addItem("Account: none", None)
+            self.account_combo.setCurrentIndex(0)
+            self.account_combo.setEnabled(False)
+            self.account_combo.blockSignals(False)
+            return
+
+        platform = self.account_service.get_device_platform(int(device_platform_id))
+        current_name = platform.get("current_account_name") if platform else ""
+        current_label = f"Use Current Account ({current_name})" if current_name else "Use Current Account"
+        self.account_combo.addItem(current_label, self.ACCOUNT_USE_CURRENT)
+        for account in self.account_service.list_accounts(int(device_platform_id)):
+            suffix = " [Current]" if bool(account.get("is_current")) else ""
+            self.account_combo.addItem(f"{account['display_name']}{suffix}", int(account["id"]))
+        self.account_combo.setEnabled(True)
+        account_index = self.account_combo.findData(preferred_data)
+        self.account_combo.setCurrentIndex(account_index if account_index >= 0 else 0)
+        self.account_combo.blockSignals(False)
+
+    def _on_device_changed(self) -> None:
+        self.refresh_runtime_targets()
+
+    def _on_platform_changed(self) -> None:
+        self._refresh_account_targets()
 
     def load_workflows(self) -> None:
         workflows = self.workflow_service.list_workflows()
@@ -735,7 +827,15 @@ class WorkflowPage(QtWidgets.QWidget):
         if device_id is None:
             QtWidgets.QMessageBox.warning(self, "Missing device", "กรุณาเพิ่มอุปกรณ์ก่อนรัน workflow")
             return
-        self._start_runner(device_id, None, "Running workflow on selected device...")
+        device_platform_id, account_id, use_current_account = self._execution_target()
+        self._start_runner(
+            device_id,
+            None,
+            "Running workflow on selected device...",
+            device_platform_id=device_platform_id,
+            account_id=account_id,
+            use_current_account=use_current_account,
+        )
 
     def run_selected_step(self) -> None:
         if not self.current_workflow_id:
@@ -749,16 +849,52 @@ class WorkflowPage(QtWidgets.QWidget):
         if device_id is None:
             QtWidgets.QMessageBox.warning(self, "Missing device", "Please add a device before running a step.")
             return
-        self._start_runner(device_id, [int(step["id"])], f"Running selected step: {step['name']}...")
+        device_platform_id, account_id, use_current_account = self._execution_target()
+        self._start_runner(
+            device_id,
+            [int(step["id"])],
+            f"Running selected step: {step['name']}...",
+            device_platform_id=device_platform_id,
+            account_id=account_id,
+            use_current_account=use_current_account,
+        )
 
-    def _start_runner(self, device_id: int, step_ids: list[int] | None, status_text: str) -> None:
+    def _start_runner(
+        self,
+        device_id: int,
+        step_ids: list[int] | None,
+        status_text: str,
+        *,
+        device_platform_id: int | None = None,
+        account_id: int | None = None,
+        use_current_account: bool = False,
+    ) -> None:
         self.run_button.setDisabled(True)
         self.run_step_button.setDisabled(True)
         self.run_status_label.setText(status_text)
-        self.runner = WorkflowRunner(self.workflow_service, self.current_workflow_id, device_id, step_ids)
+        self.runner = WorkflowRunner(
+            self.workflow_service,
+            self.current_workflow_id,
+            device_id,
+            step_ids,
+            device_platform_id=device_platform_id,
+            account_id=account_id,
+            use_current_account=use_current_account,
+        )
         self.runner.result_ready.connect(self._on_workflow_finished)
         self.runner.finished.connect(self._on_runner_finished)
         self.runner.start()
+
+    def _execution_target(self) -> tuple[int | None, int | None, bool]:
+        device_platform_id = self.platform_combo.currentData()
+        if device_platform_id is None:
+            return None, None, False
+        account_data = self.account_combo.currentData()
+        if account_data == self.ACCOUNT_USE_CURRENT:
+            return int(device_platform_id), None, True
+        if isinstance(account_data, int):
+            return int(device_platform_id), int(account_data), False
+        return int(device_platform_id), None, False
 
     def _on_runner_finished(self) -> None:
         self.runner = None

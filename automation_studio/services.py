@@ -16,6 +16,7 @@ from automation_studio.models import (
     validate_workflow_structure,
 )
 from automation_studio.repositories import (
+    AccountRepository,
     DeviceRepository,
     LogRepository,
     TelemetryRepository,
@@ -93,9 +94,31 @@ class LogService:
         device_id: int | None = None,
         watcher_id: int | None = None,
         status: str | None = None,
+        platform_key: str | None = None,
+        account_id: int | None = None,
         limit: int = 300,
         ) -> list[dict[str, Any]]:
-        return self.log_repository.list_logs(workflow_id, device_id, watcher_id, status, limit)
+        fetch_limit = max(limit, 2000) if platform_key or account_id else limit
+        logs = self.log_repository.list_logs(workflow_id, device_id, watcher_id, status, fetch_limit)
+        if not platform_key and not account_id:
+            return logs
+
+        normalized_platform_key = str(platform_key or "").strip().lower()
+        normalized_account_id = int(account_id or 0) or None
+        filtered_logs: list[dict[str, Any]] = []
+        for log in logs:
+            try:
+                metadata = json.loads(log.get("metadata") or "{}")
+            except Exception:
+                metadata = {}
+            if normalized_platform_key and str(metadata.get("platform_key") or "").strip().lower() != normalized_platform_key:
+                continue
+            if normalized_account_id is not None and int(metadata.get("account_id") or 0) != normalized_account_id:
+                continue
+            filtered_logs.append(log)
+            if len(filtered_logs) >= limit:
+                break
+        return filtered_logs
 
 
 class TelemetryService:
@@ -406,6 +429,209 @@ class WatcherService:
         return True, "Action executed on selected device", metadata
 
 
+class AccountService:
+    def __init__(
+        self,
+        account_repository: AccountRepository,
+        device_repository: DeviceRepository,
+        workflow_repository: WorkflowRepository,
+    ) -> None:
+        self.account_repository = account_repository
+        self.device_repository = device_repository
+        self.workflow_repository = workflow_repository
+
+    def list_device_platforms(self, device_id: int) -> list[dict[str, Any]]:
+        return self.account_repository.list_device_platforms(device_id)
+
+    def get_device_platform(self, device_platform_id: int) -> dict[str, Any] | None:
+        return self.account_repository.get_device_platform(device_platform_id)
+
+    def save_device_platform(
+        self,
+        device_platform_id: int | None,
+        device_id: int,
+        platform_key: str,
+        platform_name: str,
+        package_name: str,
+        switch_workflow_id: int | None,
+        is_enabled: bool = True,
+    ) -> int:
+        normalized_key = str(platform_key or "").strip().lower()
+        normalized_name = str(platform_name or "").strip()
+        if not normalized_key:
+            raise ValueError("Platform key is required")
+        if not normalized_name:
+            raise ValueError("Platform name is required")
+        if not self.device_repository.get_device(device_id):
+            raise ValueError("Device not found")
+        if switch_workflow_id and not self.workflow_repository.get_workflow(int(switch_workflow_id)):
+            raise ValueError("Switch workflow not found")
+        existing = self.account_repository.get_device_platform_by_key(device_id, normalized_key)
+        if existing and int(existing["id"]) != int(device_platform_id or 0):
+            raise ValueError("Platform key already exists for this device")
+        return self.account_repository.upsert_device_platform(
+            device_platform_id=device_platform_id,
+            device_id=device_id,
+            platform_key=normalized_key,
+            platform_name=normalized_name,
+            package_name=str(package_name or "").strip(),
+            switch_workflow_id=int(switch_workflow_id) if switch_workflow_id else None,
+            is_enabled=is_enabled,
+        )
+
+    def delete_device_platform(self, device_platform_id: int) -> None:
+        self.account_repository.delete_device_platform(device_platform_id)
+
+    def list_accounts(self, device_platform_id: int) -> list[dict[str, Any]]:
+        return self.account_repository.list_accounts(device_platform_id)
+
+    def get_account(self, account_id: int) -> dict[str, Any] | None:
+        return self.account_repository.get_account(account_id)
+
+    def save_account(
+        self,
+        account_id: int | None,
+        device_platform_id: int,
+        display_name: str,
+        username: str,
+        login_id: str,
+        notes: str,
+        metadata_text: str,
+        is_enabled: bool = True,
+    ) -> int:
+        platform = self.account_repository.get_device_platform(device_platform_id)
+        if not platform:
+            raise ValueError("Device platform not found")
+        normalized_display_name = str(display_name or "").strip()
+        if not normalized_display_name:
+            raise ValueError("Account display name is required")
+        try:
+            parsed_metadata = json.loads(metadata_text or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Metadata JSON is invalid: {exc}") from exc
+        existing = self.account_repository.get_account_by_name(device_platform_id, normalized_display_name)
+        if existing and int(existing["id"]) != int(account_id or 0):
+            raise ValueError("Account display name already exists for this platform")
+        return self.account_repository.upsert_account(
+            account_id=account_id,
+            device_platform_id=device_platform_id,
+            display_name=normalized_display_name,
+            username=str(username or "").strip(),
+            login_id=str(login_id or "").strip(),
+            notes=str(notes or "").strip(),
+            metadata_json=json.dumps(parsed_metadata, indent=2, ensure_ascii=False),
+            is_enabled=is_enabled,
+        )
+
+    def delete_account(self, account_id: int) -> None:
+        self.account_repository.delete_account(account_id)
+
+    def set_current_account(self, device_platform_id: int, account_id: int | None) -> None:
+        self.account_repository.update_current_account(device_platform_id, account_id)
+
+    def resolve_switch_target(
+        self,
+        device_id: int,
+        platform_key: str,
+        account_id: int | None = None,
+        account_name: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        device_platform = self.account_repository.get_device_platform_by_key(device_id, str(platform_key or "").strip().lower())
+        if not device_platform:
+            raise ValueError("Platform not found on this device")
+        if not bool(device_platform.get("is_enabled", 1)):
+            raise ValueError("Platform is disabled")
+        if account_id:
+            account = self.account_repository.get_account(int(account_id))
+            if not account or int(account["device_platform_id"]) != int(device_platform["id"]):
+                raise ValueError("Account not found for this platform")
+        else:
+            account = self.account_repository.get_account_by_name(int(device_platform["id"]), str(account_name or "").strip())
+            if not account:
+                raise ValueError("Account not found for this platform")
+        if not bool(account.get("is_enabled", 1)):
+            raise ValueError("Account is disabled")
+        return device_platform, account
+
+    def resolve_runtime_context(
+        self,
+        device_id: int,
+        device_platform_id: int | None = None,
+        account_id: int | None = None,
+        use_current_account: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not device_platform_id:
+            return {}, {}
+
+        device_platform = self.account_repository.get_device_platform(int(device_platform_id))
+        if not device_platform or int(device_platform["device_id"]) != int(device_id):
+            raise ValueError("Platform not found on this device")
+        if not bool(device_platform.get("is_enabled", 1)):
+            raise ValueError("Platform is disabled")
+
+        platform_context = {
+            "id": int(device_platform["id"]),
+            "key": str(device_platform["platform_key"] or ""),
+            "name": str(device_platform["platform_name"] or ""),
+            "package_name": str(device_platform.get("package_name") or ""),
+            "switch_workflow_id": int(device_platform.get("switch_workflow_id") or 0) or None,
+        }
+        runtime_context: dict[str, Any] = {
+            "platform": platform_context,
+            "vars": {
+                "current_platform_key": platform_context["key"],
+                "current_platform_name": platform_context["name"],
+            },
+        }
+        metadata: dict[str, Any] = {
+            "device_platform_id": platform_context["id"],
+            "platform_key": platform_context["key"],
+            "platform_name": platform_context["name"],
+        }
+
+        resolved_account: dict[str, Any] | None = None
+        if account_id:
+            resolved_account = self.account_repository.get_account(int(account_id))
+            if not resolved_account or int(resolved_account["device_platform_id"]) != int(device_platform["id"]):
+                raise ValueError("Account not found for this platform")
+            if not bool(resolved_account.get("is_enabled", 1)):
+                raise ValueError("Account is disabled")
+        elif use_current_account and int(device_platform.get("current_account_id") or 0) > 0:
+            resolved_account = self.account_repository.get_account(int(device_platform["current_account_id"]))
+            if resolved_account and not bool(resolved_account.get("is_enabled", 1)):
+                resolved_account = None
+
+        if resolved_account:
+            account_context = {
+                "id": int(resolved_account["id"]),
+                "device_platform_id": int(resolved_account["device_platform_id"]),
+                "display_name": str(resolved_account.get("display_name") or ""),
+                "username": str(resolved_account.get("username") or ""),
+                "login_id": str(resolved_account.get("login_id") or ""),
+                "notes": str(resolved_account.get("notes") or ""),
+                "metadata": json.loads(resolved_account.get("metadata_json") or "{}"),
+            }
+            runtime_context["account"] = account_context
+            runtime_context["vars"].update(
+                {
+                    "current_account_id": account_context["id"],
+                    "current_account_name": account_context["display_name"],
+                    "current_account_username": account_context["username"],
+                    "current_account_login_id": account_context["login_id"],
+                }
+            )
+            metadata.update(
+                {
+                    "account_id": account_context["id"],
+                    "account_name": account_context["display_name"],
+                    "account_username": account_context["username"],
+                    "account_login_id": account_context["login_id"],
+                }
+            )
+
+        return runtime_context, metadata
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -416,6 +642,7 @@ class WorkflowService:
         telemetry_service: TelemetryService,
         watcher_service: WatcherService,
         watcher_telemetry_service: WatcherTelemetryService,
+        account_service: AccountService | None = None,
     ) -> None:
         self.workflow_repository = workflow_repository
         self.device_repository = device_repository
@@ -424,6 +651,7 @@ class WorkflowService:
         self.telemetry_service = telemetry_service
         self.watcher_service = watcher_service
         self.watcher_telemetry_service = watcher_telemetry_service
+        self.account_service = account_service
 
     def list_workflows(self) -> list[dict[str, Any]]:
         return self.workflow_repository.list_workflows()
@@ -534,6 +762,114 @@ class WorkflowService:
         requested_ids = {int(step_id) for step_id in step_ids}
         return [step for step in steps if int(step["id"]) in requested_ids]
 
+    def _executor_for_runtime(
+        self,
+        *,
+        device,
+        workflow: dict[str, Any],
+        device_record: dict[str, Any],
+        shared_context: dict[str, Any] | None = None,
+    ) -> WorkflowExecutor:
+        return WorkflowExecutor(
+            device=device,
+            workflow=workflow,
+            device_record=device_record,
+            log_service=self.log_service,
+            telemetry_service=self.telemetry_service,
+            watchers=self.watcher_service.resolve_active_watchers(int(workflow["id"]), int(device_record["id"])),
+            watcher_telemetry_service=self.watcher_telemetry_service,
+            switch_account_handler=self._execute_switch_account_step,
+            shared_context=shared_context,
+        )
+
+    def _execute_switch_account_step(
+        self,
+        executor: WorkflowExecutor,
+        parameters: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.account_service:
+            raise RuntimeError("Account service is not available")
+
+        platform_key = str(parameters.get("platform_key", "") or "").strip().lower()
+        account_id = int(parameters.get("account_id", 0) or 0) or None
+        account_name = str(parameters.get("account_name", "") or "").strip() or None
+        if not platform_key:
+            raise RuntimeError("switch_account requires platform_key")
+        if not account_id and not account_name:
+            raise RuntimeError("switch_account requires account_id or account_name")
+
+        device_platform, account = self.account_service.resolve_switch_target(
+            int(executor.device_record["id"]),
+            platform_key,
+            account_id=account_id,
+            account_name=account_name,
+        )
+
+        switch_workflow_id = int(device_platform.get("switch_workflow_id") or 0)
+        if switch_workflow_id <= 0:
+            raise RuntimeError("No switch workflow configured for this platform")
+
+        if bool(parameters.get("launch_package_first")) and str(device_platform.get("package_name") or "").strip():
+            executor.device.app_start(str(device_platform["package_name"]))
+
+        account_context = {
+            "id": int(account["id"]),
+            "device_platform_id": int(account["device_platform_id"]),
+            "display_name": account["display_name"],
+            "username": account.get("username") or "",
+            "login_id": account.get("login_id") or "",
+            "notes": account.get("notes") or "",
+            "metadata": json.loads(account.get("metadata_json") or "{}"),
+        }
+        platform_context = {
+            "id": int(device_platform["id"]),
+            "key": device_platform["platform_key"],
+            "name": device_platform["platform_name"],
+            "package_name": device_platform.get("package_name") or "",
+            "switch_workflow_id": switch_workflow_id,
+        }
+        executor.context["platform"] = platform_context
+        executor.context["account"] = account_context
+        executor.context["vars"]["current_platform_key"] = platform_context["key"]
+        executor.context["vars"]["current_platform_name"] = platform_context["name"]
+        executor.context["vars"]["current_account_id"] = account_context["id"]
+        executor.context["vars"]["current_account_name"] = account_context["display_name"]
+        executor.context["vars"]["current_account_username"] = account_context["username"]
+        executor.context["vars"]["current_account_login_id"] = account_context["login_id"]
+
+        switch_workflow = self.workflow_repository.get_workflow(switch_workflow_id)
+        if not switch_workflow:
+            raise RuntimeError("Switch workflow not found")
+        switch_steps = self.workflow_repository.list_steps(switch_workflow_id)
+        if not switch_steps:
+            raise RuntimeError("Switch workflow has no steps")
+
+        validation_errors = self._validate_steps(switch_steps, include_structure=True)
+        if validation_errors:
+            raise RuntimeError("Switch workflow validation failed: " + "; ".join(validation_errors))
+
+        nested_executor = self._executor_for_runtime(
+            device=executor.device,
+            workflow=switch_workflow,
+            device_record=executor.device_record,
+            shared_context=executor.context,
+        )
+        summary = nested_executor.run(switch_steps)
+        if summary.get("stopped_by_watcher"):
+            raise RuntimeError(str(summary.get("stop_reason") or "Switch workflow stopped by watcher"))
+
+        self.account_service.set_current_account(int(device_platform["id"]), int(account["id"]))
+        return {
+            "platform_key": platform_context["key"],
+            "platform_name": platform_context["name"],
+            "account_id": account_context["id"],
+            "account_name": account_context["display_name"],
+            "switch_workflow_id": switch_workflow_id,
+            "switch_workflow_name": switch_workflow.get("name") or "",
+            "switch_summary": summary,
+        }
+
     def export_workflow_definition(self, workflow_id: int) -> dict[str, Any]:
         workflow = self.workflow_repository.get_workflow(workflow_id)
         if not workflow:
@@ -623,17 +959,49 @@ class WorkflowService:
 
         return workflow_id
 
-    def execute_workflow(self, workflow_id: int, device_id: int) -> dict[str, Any]:
-        return self._execute_workflow_run(workflow_id, device_id, step_ids=None)
+    def execute_workflow(
+        self,
+        workflow_id: int,
+        device_id: int,
+        device_platform_id: int | None = None,
+        account_id: int | None = None,
+        use_current_account: bool = False,
+    ) -> dict[str, Any]:
+        return self._execute_workflow_run(
+            workflow_id,
+            device_id,
+            step_ids=None,
+            device_platform_id=device_platform_id,
+            account_id=account_id,
+            use_current_account=use_current_account,
+        )
 
-    def execute_step(self, workflow_id: int, step_id: int, device_id: int) -> dict[str, Any]:
-        return self._execute_workflow_run(workflow_id, device_id, step_ids=[step_id])
+    def execute_step(
+        self,
+        workflow_id: int,
+        step_id: int,
+        device_id: int,
+        device_platform_id: int | None = None,
+        account_id: int | None = None,
+        use_current_account: bool = False,
+    ) -> dict[str, Any]:
+        return self._execute_workflow_run(
+            workflow_id,
+            device_id,
+            step_ids=[step_id],
+            device_platform_id=device_platform_id,
+            account_id=account_id,
+            use_current_account=use_current_account,
+        )
 
     def _execute_workflow_run(
         self,
         workflow_id: int,
         device_id: int,
         step_ids: list[int] | None = None,
+        device_platform_id: int | None = None,
+        account_id: int | None = None,
+        use_current_account: bool = False,
     ) -> dict[str, Any]:
         workflow = self.workflow_repository.get_workflow(workflow_id)
         device_record = self.device_repository.get_device(device_id)
@@ -673,14 +1041,24 @@ class WorkflowService:
             )
             return {"success": False, "message": f"Device connection failed: {exc}"}
 
-        executor = WorkflowExecutor(
+        shared_context: dict[str, Any] | None = None
+        context_metadata: dict[str, Any] = {}
+        if self.account_service and device_platform_id:
+            try:
+                shared_context, context_metadata = self.account_service.resolve_runtime_context(
+                    int(device_id),
+                    int(device_platform_id),
+                    account_id=account_id,
+                    use_current_account=use_current_account,
+                )
+            except Exception as exc:
+                return {"success": False, "message": str(exc)}
+
+        executor = self._executor_for_runtime(
             device=device,
             workflow=workflow,
             device_record=device_record,
-            log_service=self.log_service,
-            telemetry_service=self.telemetry_service,
-            watchers=self.watcher_service.resolve_active_watchers(workflow_id, device_id),
-            watcher_telemetry_service=self.watcher_telemetry_service,
+            shared_context=shared_context,
         )
 
         execution_scope = "selected_step" if step_ids else "workflow"
@@ -706,6 +1084,7 @@ class WorkflowService:
                 "artifact_dir": str(executor.run_artifact_dir),
                 "execution_scope": execution_scope,
                 "selected_step_ids": [int(step["id"]) for step in steps] if step_ids else [],
+                **context_metadata,
             },
         )
 
@@ -718,7 +1097,7 @@ class WorkflowService:
                     "WARNING",
                     "workflow_stopped",
                     f"{execution_name.capitalize()} stopped by watcher",
-                    summary,
+                    {**summary, **context_metadata},
                 )
                 return {
                     "success": True,
@@ -730,7 +1109,7 @@ class WorkflowService:
                 "INFO",
                 "workflow_success",
                 f"Completed {execution_name}",
-                summary,
+                {**summary, **context_metadata},
             )
             continued = int(summary.get("continued_failures", 0))
             skipped = int(summary.get("skipped_failures", 0))
@@ -758,6 +1137,7 @@ class WorkflowService:
                     "run_id": executor.run_id,
                     "artifact_dir": str(executor.run_artifact_dir),
                     "execution_scope": execution_scope,
+                    **context_metadata,
                 },
             )
             return {"success": False, "message": str(exc)}

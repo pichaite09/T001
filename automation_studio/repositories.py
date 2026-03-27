@@ -740,3 +740,263 @@ class WatcherTelemetryRepository:
         with self.db.connection() as connection:
             rows = connection.execute(query, values).fetchall()
         return [row_to_dict(row) for row in rows]
+
+
+class AccountRepository:
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def list_device_platforms(self, device_id: int) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    device_platforms.*,
+                    workflows.name AS switch_workflow_name,
+                    accounts.display_name AS current_account_name,
+                    COUNT(platform_accounts.id) AS account_count
+                FROM device_platforms
+                LEFT JOIN workflows ON workflows.id = device_platforms.switch_workflow_id
+                LEFT JOIN accounts ON accounts.id = device_platforms.current_account_id
+                LEFT JOIN accounts AS platform_accounts
+                    ON platform_accounts.device_platform_id = device_platforms.id
+                WHERE device_platforms.device_id = ?
+                GROUP BY device_platforms.id
+                ORDER BY device_platforms.platform_name COLLATE NOCASE, device_platforms.id
+                """,
+                (device_id,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_device_platform(self, device_platform_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    device_platforms.*,
+                    workflows.name AS switch_workflow_name,
+                    accounts.display_name AS current_account_name
+                FROM device_platforms
+                LEFT JOIN workflows ON workflows.id = device_platforms.switch_workflow_id
+                LEFT JOIN accounts ON accounts.id = device_platforms.current_account_id
+                WHERE device_platforms.id = ?
+                """,
+                (device_platform_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def get_device_platform_by_key(self, device_id: int, platform_key: str) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    device_platforms.*,
+                    workflows.name AS switch_workflow_name,
+                    accounts.display_name AS current_account_name
+                FROM device_platforms
+                LEFT JOIN workflows ON workflows.id = device_platforms.switch_workflow_id
+                LEFT JOIN accounts ON accounts.id = device_platforms.current_account_id
+                WHERE device_platforms.device_id = ? AND LOWER(device_platforms.platform_key) = LOWER(?)
+                """,
+                (device_id, platform_key),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_device_platform(
+        self,
+        device_platform_id: int | None,
+        device_id: int,
+        platform_key: str,
+        platform_name: str,
+        package_name: str,
+        switch_workflow_id: int | None,
+        is_enabled: bool = True,
+    ) -> int:
+        timestamp = self.db.local_timestamp()
+        normalized_workflow_id = int(switch_workflow_id) if switch_workflow_id else None
+        if device_platform_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE device_platforms
+                    SET platform_key = ?, platform_name = ?, package_name = ?, switch_workflow_id = ?,
+                        is_enabled = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        platform_key,
+                        platform_name,
+                        package_name,
+                        normalized_workflow_id,
+                        int(is_enabled),
+                        timestamp,
+                        device_platform_id,
+                    ),
+                )
+            return device_platform_id
+
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO device_platforms (
+                    device_id, platform_key, platform_name, package_name, switch_workflow_id,
+                    is_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    device_id,
+                    platform_key,
+                    platform_name,
+                    package_name,
+                    normalized_workflow_id,
+                    int(is_enabled),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_device_platform(self, device_platform_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM device_platforms WHERE id = ?", (device_platform_id,))
+
+    def update_current_account(self, device_platform_id: int, account_id: int | None) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE device_platforms
+                SET current_account_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (int(account_id) if account_id else None, timestamp, device_platform_id),
+            )
+
+    def list_accounts(self, device_platform_id: int) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    accounts.*,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    CASE
+                        WHEN device_platforms.current_account_id = accounts.id THEN 1
+                        ELSE 0
+                    END AS is_current
+                FROM accounts
+                INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
+                WHERE accounts.device_platform_id = ?
+                ORDER BY accounts.display_name COLLATE NOCASE, accounts.id
+                """,
+                (device_platform_id,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_account(self, account_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    accounts.*,
+                    device_platforms.device_id,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    device_platforms.package_name,
+                    device_platforms.switch_workflow_id,
+                    CASE
+                        WHEN device_platforms.current_account_id = accounts.id THEN 1
+                        ELSE 0
+                    END AS is_current
+                FROM accounts
+                INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
+                WHERE accounts.id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def get_account_by_name(self, device_platform_id: int, display_name: str) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    accounts.*,
+                    device_platforms.device_id,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    device_platforms.package_name,
+                    device_platforms.switch_workflow_id,
+                    CASE
+                        WHEN device_platforms.current_account_id = accounts.id THEN 1
+                        ELSE 0
+                    END AS is_current
+                FROM accounts
+                INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
+                WHERE accounts.device_platform_id = ? AND LOWER(accounts.display_name) = LOWER(?)
+                """,
+                (device_platform_id, display_name),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_account(
+        self,
+        account_id: int | None,
+        device_platform_id: int,
+        display_name: str,
+        username: str,
+        login_id: str,
+        notes: str,
+        metadata_json: str,
+        is_enabled: bool = True,
+    ) -> int:
+        timestamp = self.db.local_timestamp()
+        if account_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE accounts
+                    SET display_name = ?, username = ?, login_id = ?, notes = ?, metadata_json = ?,
+                        is_enabled = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        display_name,
+                        username,
+                        login_id,
+                        notes,
+                        metadata_json,
+                        int(is_enabled),
+                        timestamp,
+                        account_id,
+                    ),
+                )
+            return account_id
+
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO accounts (
+                    device_platform_id, display_name, username, login_id, notes, metadata_json,
+                    is_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    device_platform_id,
+                    display_name,
+                    username,
+                    login_id,
+                    notes,
+                    metadata_json,
+                    int(is_enabled),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_account(self, account_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM accounts WHERE id = ?", (account_id,))

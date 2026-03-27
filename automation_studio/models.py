@@ -614,6 +614,29 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="switch_account",
+        label="Switch Account",
+        description="Run the configured switch workflow for a platform and target account on the current device.",
+        template={
+            "platform_key": "shopee",
+            "account_name": "main-shop",
+            "launch_package_first": True,
+        },
+        fields=(
+            StepField("platform_key", "Platform Key", required=True, placeholder="shopee"),
+            StepField("account_name", "Account Name", placeholder="main-shop"),
+            StepField("account_id", "Account ID", field_type="int", default=0, min_value=0),
+            StepField("launch_package_first", "Launch Package First", field_type="bool", default=True),
+        ),
+        presets=(
+            StepPreset(
+                "Switch By Name",
+                "Resolve the account by platform key and display name.",
+                {"platform_key": "shopee", "account_name": "main-shop", "launch_package_first": True},
+            ),
+        ),
+    ),
+    StepDefinition(
         key="press_key",
         label="Press Key",
         description="Press common Android keys such as home, back, or enter.",
@@ -999,6 +1022,16 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
             errors.append("Duration must be greater than or equal to 0")
         if pause_seconds is not None and pause_seconds < 0:
             errors.append("Pause Seconds must be greater than or equal to 0")
+
+    if step_type == "switch_account":
+        if not str(parameters.get("platform_key", "")).strip():
+            errors.append("Platform Key is required")
+        account_id = _safe_int(parameters.get("account_id", 0) or 0, "Account ID", errors)
+        account_name = str(parameters.get("account_name", "") or "").strip()
+        if account_id is not None and account_id < 0:
+            errors.append("Account ID must be greater than or equal to 0")
+        if not account_name and not int(parameters.get("account_id", 0) or 0):
+            errors.append("Switch Account requires account_name or account_id")
 
     if step_type == "press_key" and not str(parameters.get("key", "")).strip():
         errors.append("Key is required")

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from automation_studio.database import DatabaseManager
 from automation_studio.repositories import (
+    AccountRepository,
     DeviceRepository,
     LogRepository,
     TelemetryRepository,
@@ -16,6 +17,7 @@ from automation_studio.repositories import (
     WorkflowRepository,
 )
 from automation_studio.services import (
+    AccountService,
     DeviceService,
     LogService,
     TelemetryService,
@@ -28,6 +30,9 @@ from automation_studio.services import (
 class FakeDevice:
     def __init__(self) -> None:
         self.actions: list[tuple] = []
+
+    def app_start(self, package: str):
+        self.actions.append(("app_start", package))
 
     def click(self, x: int, y: int):
         self.actions.append(("click", x, y))
@@ -61,6 +66,7 @@ class ServicePhase4Tests(unittest.TestCase):
         self.db.init_schema()
         self.workflow_repository = WorkflowRepository(self.db)
         self.device_repository = DeviceRepository(self.db)
+        self.account_repository = AccountRepository(self.db)
         self.log_repository = LogRepository(self.db)
         self.telemetry_repository = TelemetryRepository(self.db)
         self.watcher_repository = WatcherRepository(self.db)
@@ -77,6 +83,11 @@ class ServicePhase4Tests(unittest.TestCase):
             self.log_service,
             self.watcher_telemetry_service,
         )
+        self.account_service = AccountService(
+            self.account_repository,
+            self.device_repository,
+            self.workflow_repository,
+        )
         self.service = WorkflowService(
             self.workflow_repository,
             self.device_repository,
@@ -85,6 +96,7 @@ class ServicePhase4Tests(unittest.TestCase):
             self.telemetry_service,
             self.watcher_service,
             self.watcher_telemetry_service,
+            self.account_service,
         )
 
     def tearDown(self) -> None:
@@ -160,6 +172,122 @@ class ServicePhase4Tests(unittest.TestCase):
         logs = self.log_service.list_logs(workflow_id=workflow_id, device_id=device_id, limit=20)
         start_log = next(log for log in logs if log["status"] == "workflow_started")
         self.assertEqual(json.loads(start_log["metadata"])["execution_scope"], "selected_step")
+
+    def test_switch_account_step_runs_platform_switch_workflow_and_updates_current_account(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)
+        self.service.save_step(
+            None,
+            switch_workflow_id,
+            1,
+            "Capture Account",
+            "set_variable",
+            json.dumps(
+                {
+                    "variable_name": "switched_to",
+                    "value_mode": "template",
+                    "value": "${account.get('display_name')}",
+                }
+            ),
+            True,
+        )
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            switch_workflow_id,
+            True,
+        )
+        account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "main-shop",
+            "shop_user",
+            "shop_login",
+            "",
+            "{}",
+            True,
+        )
+
+        main_workflow_id = self.service.save_workflow(None, "Main Workflow", "", True)
+        step_id = self.service.save_step(
+            None,
+            main_workflow_id,
+            1,
+            "Switch Account",
+            "switch_account",
+            json.dumps({"platform_key": "shopee", "account_name": "main-shop", "launch_package_first": True}),
+            True,
+        )
+
+        result = self.service.execute_step(main_workflow_id, step_id, device_id)
+
+        self.assertTrue(result["success"])
+        self.assertIn(("app_start", "com.shopee.th"), self.fake_device.actions)
+        device_platform = self.account_service.get_device_platform(device_platform_id)
+        self.assertEqual(int(device_platform["current_account_id"]), account_id)
+
+    def test_execute_workflow_injects_selected_account_context_and_filters_logs(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        workflow_id = self.service.save_workflow(None, "Context Run", "", True)
+        self.service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Capture Account",
+            "set_variable",
+            json.dumps(
+                {
+                    "variable_name": "selected_account",
+                    "value_mode": "template",
+                    "value": "${account.get('display_name')}",
+                }
+            ),
+            True,
+        )
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            None,
+            True,
+        )
+        account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "main-shop",
+            "shop_user",
+            "shop_login",
+            "",
+            "{}",
+            True,
+        )
+        self.account_service.set_current_account(device_platform_id, account_id)
+
+        result = self.service.execute_workflow(
+            workflow_id,
+            device_id,
+            device_platform_id=device_platform_id,
+            use_current_account=True,
+        )
+
+        self.assertTrue(result["success"])
+        filtered_logs = self.log_service.list_logs(
+            workflow_id=workflow_id,
+            device_id=device_id,
+            platform_key="shopee",
+            account_id=account_id,
+            limit=20,
+        )
+        self.assertTrue(filtered_logs)
+        start_log = next(log for log in filtered_logs if log["status"] == "workflow_started")
+        metadata = json.loads(start_log["metadata"])
+        self.assertEqual(metadata["platform_key"], "shopee")
+        self.assertEqual(metadata["account_id"], account_id)
 
 
 if __name__ == "__main__":

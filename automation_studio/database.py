@@ -75,6 +75,7 @@ class DatabaseManager:
             (6, self._migration_006_watchers),
             (7, self._migration_007_log_watcher_index),
             (8, self._migration_008_watcher_profiles),
+            (9, self._migration_009_accounts),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -288,6 +289,45 @@ class DatabaseManager:
                 PRIMARY KEY (workflow_id, profile_id),
                 FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
                 FOREIGN KEY(profile_id) REFERENCES watcher_profiles(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _migration_009_accounts(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_platforms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                platform_key TEXT NOT NULL,
+                platform_name TEXT NOT NULL,
+                package_name TEXT NOT NULL DEFAULT '',
+                switch_workflow_id INTEGER,
+                current_account_id INTEGER,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(device_id, platform_key),
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                FOREIGN KEY(switch_workflow_id) REFERENCES workflows(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_platform_id INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                login_id TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(device_platform_id, display_name),
+                FOREIGN KEY(device_platform_id) REFERENCES device_platforms(id) ON DELETE CASCADE
             )
             """
         )

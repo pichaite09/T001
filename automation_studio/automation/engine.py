@@ -29,6 +29,8 @@ class WorkflowExecutor:
         telemetry_service: Any | None = None,
         watchers: list[dict[str, Any]] | None = None,
         watcher_telemetry_service: Any | None = None,
+        switch_account_handler: Any | None = None,
+        shared_context: dict[str, Any] | None = None,
     ) -> None:
         self.device = device
         self.workflow = workflow
@@ -37,6 +39,7 @@ class WorkflowExecutor:
         self.telemetry_service = telemetry_service
         self.watchers = sorted(watchers or [], key=lambda item: (int(item.get("priority", 100)), int(item.get("id", 0))))
         self.watcher_telemetry_service = watcher_telemetry_service
+        self.switch_account_handler = switch_account_handler
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_artifact_dir = (
             Path("artifacts")
@@ -44,8 +47,9 @@ class WorkflowExecutor:
             / f"workflow_{self.workflow['id']}_device_{self.device_record['id']}_{self.run_id}"
         )
         self.run_artifact_dir.mkdir(parents=True, exist_ok=True)
+        shared_vars = shared_context.get("vars") if shared_context else None
         self.context: dict[str, Any] = {
-            "vars": {},
+            "vars": shared_vars if isinstance(shared_vars, dict) else {},
             "workflow": {"id": workflow["id"], "name": workflow["name"], "description": workflow.get("description", "")},
             "device": dict(device_record),
             "run": {
@@ -54,6 +58,11 @@ class WorkflowExecutor:
                 "started_at": datetime.now().isoformat(timespec="seconds"),
             },
         }
+        if shared_context:
+            if "platform" in shared_context:
+                self.context["platform"] = shared_context["platform"]
+            if "account" in shared_context:
+                self.context["account"] = shared_context["account"]
         self._watcher_runtime: dict[int, dict[str, Any]] = {}
         self._watcher_action_depth = 0
         self._stop_requested = False
@@ -196,6 +205,7 @@ class WorkflowExecutor:
             "swipe": self._swipe,
             "scroll": self._scroll,
             "scroll_to_selector": self._scroll_to_selector,
+            "switch_account": self._switch_account,
             "press_key": self._press_key,
             "input_keycode": self._input_keycode,
             "shell": self._shell,
@@ -720,6 +730,7 @@ class WorkflowExecutor:
             "scope_id": watcher.get("scope_id"),
             "run_id": self.run_id,
         }
+        payload.update(self._context_log_metadata())
         if step:
             payload.update(
                 {
@@ -948,6 +959,8 @@ class WorkflowExecutor:
             "vars": self.context["vars"],
             "workflow": self.context["workflow"],
             "device": self.context["device"],
+            "platform": self.context.get("platform", {}),
+            "account": self.context.get("account", {}),
             "run": self.context["run"],
             "step": step,
             "parameters": parameters,
@@ -1172,6 +1185,11 @@ class WorkflowExecutor:
                     break
 
         raise RuntimeError(f"Target not found after {max_swipes} swipe(s)")
+
+    def _switch_account(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        if not self.switch_account_handler:
+            raise RuntimeError("switch_account is not configured for this runtime")
+        return self.switch_account_handler(self, parameters, runtime)
 
     def _run_swipe(self, parameters: dict[str, Any]) -> dict[str, Any]:
         x1, y1, x2, y2 = self._resolve_swipe_points(parameters)
@@ -1479,6 +1497,7 @@ class WorkflowExecutor:
             "artifact_dir": str(self._step_artifact_dir(step)),
             "context_var_count": len(self.context["vars"]),
         }
+        base_metadata.update(self._context_log_metadata())
         base_metadata.update(metadata)
         self.log_service.add(
             self.workflow["id"],
@@ -1488,3 +1507,26 @@ class WorkflowExecutor:
             message,
             base_metadata,
         )
+
+    def _context_log_metadata(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        platform = self.context.get("platform")
+        if isinstance(platform, dict):
+            metadata.update(
+                {
+                    "device_platform_id": platform.get("id"),
+                    "platform_key": platform.get("key") or "",
+                    "platform_name": platform.get("name") or "",
+                }
+            )
+        account = self.context.get("account")
+        if isinstance(account, dict):
+            metadata.update(
+                {
+                    "account_id": account.get("id"),
+                    "account_name": account.get("display_name") or "",
+                    "account_username": account.get("username") or "",
+                    "account_login_id": account.get("login_id") or "",
+                }
+            )
+        return metadata
