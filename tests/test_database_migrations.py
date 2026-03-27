@@ -15,7 +15,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             db = DatabaseManager(db_path)
             db.init_schema()
 
-            self.assertEqual(db.current_schema_version(), 7)
+            self.assertEqual(db.current_schema_version(), 8)
 
             with db.connection() as connection:
                 workflow_columns = {
@@ -34,14 +34,25 @@ class DatabaseMigrationTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='step_telemetry'"
                 ).fetchall()
                 watcher_tables = connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('watchers', 'watcher_telemetry')"
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type='table'
+                      AND name IN (
+                        'watchers',
+                        'watcher_telemetry',
+                        'watcher_profiles',
+                        'watcher_profile_items',
+                        'workflow_watcher_profiles'
+                      )
+                    """
                 ).fetchall()
 
             self.assertIn("definition_version", workflow_columns)
             self.assertIn("schema_version", step_columns)
             self.assertIn("watcher_id", log_columns)
             self.assertTrue(telemetry_tables)
-            self.assertEqual(len(watcher_tables), 2)
+            self.assertEqual(len(watcher_tables), 5)
         finally:
             if os.path.exists(db_path):
                 os.remove(db_path)

@@ -74,6 +74,7 @@ class DatabaseManager:
             (5, self._migration_005_local_timestamps),
             (6, self._migration_006_watchers),
             (7, self._migration_007_log_watcher_index),
+            (8, self._migration_008_watcher_profiles),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -250,6 +251,43 @@ class DatabaseManager:
                 FOREIGN KEY(watcher_id) REFERENCES watchers(id) ON DELETE CASCADE,
                 FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
                 FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _migration_008_watcher_profiles(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watcher_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watcher_profile_items (
+                profile_id INTEGER NOT NULL,
+                watcher_id INTEGER NOT NULL,
+                position INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (profile_id, watcher_id),
+                FOREIGN KEY(profile_id) REFERENCES watcher_profiles(id) ON DELETE CASCADE,
+                FOREIGN KEY(watcher_id) REFERENCES watchers(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_watcher_profiles (
+                workflow_id INTEGER NOT NULL,
+                profile_id INTEGER NOT NULL,
+                PRIMARY KEY (workflow_id, profile_id),
+                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+                FOREIGN KEY(profile_id) REFERENCES watcher_profiles(id) ON DELETE CASCADE
             )
             """
         )

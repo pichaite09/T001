@@ -498,6 +498,158 @@ class WatcherRepository:
             ).fetchall()
         return [row_to_dict(row) for row in rows]
 
+    def list_profiles(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    watcher_profiles.*,
+                    COUNT(watcher_profile_items.watcher_id) AS watcher_count
+                FROM watcher_profiles
+                LEFT JOIN watcher_profile_items
+                    ON watcher_profile_items.profile_id = watcher_profiles.id
+                GROUP BY watcher_profiles.id
+                ORDER BY watcher_profiles.name COLLATE NOCASE, watcher_profiles.id
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_profile(self, profile_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    watcher_profiles.*,
+                    COUNT(watcher_profile_items.watcher_id) AS watcher_count
+                FROM watcher_profiles
+                LEFT JOIN watcher_profile_items
+                    ON watcher_profile_items.profile_id = watcher_profiles.id
+                WHERE watcher_profiles.id = ?
+                GROUP BY watcher_profiles.id
+                """,
+                (profile_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_profile(
+        self,
+        profile_id: int | None,
+        name: str,
+        description: str,
+        is_active: bool = True,
+    ) -> int:
+        timestamp = self.db.local_timestamp()
+        if profile_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE watcher_profiles
+                    SET name = ?, description = ?, is_active = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (name, description, int(is_active), timestamp, profile_id),
+                )
+            return profile_id
+
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO watcher_profiles (name, description, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, description, int(is_active), timestamp, timestamp),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_profile(self, profile_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM watcher_profiles WHERE id = ?", (profile_id,))
+
+    def list_profile_watchers(self, profile_id: int) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    watchers.*,
+                    watcher_profile_items.position,
+                    watcher_profiles.name AS profile_name
+                FROM watcher_profile_items
+                INNER JOIN watchers ON watchers.id = watcher_profile_items.watcher_id
+                INNER JOIN watcher_profiles ON watcher_profiles.id = watcher_profile_items.profile_id
+                WHERE watcher_profile_items.profile_id = ?
+                ORDER BY watcher_profile_items.position, watchers.priority, watchers.id
+                """,
+                (profile_id,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def save_profile_watchers(self, profile_id: int, watcher_ids: list[int]) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM watcher_profile_items WHERE profile_id = ?", (profile_id,))
+            for position, watcher_id in enumerate(watcher_ids, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO watcher_profile_items (profile_id, watcher_id, position)
+                    VALUES (?, ?, ?)
+                    """,
+                    (profile_id, watcher_id, position),
+                )
+
+    def list_profiles_for_workflow(self, workflow_id: int) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    watcher_profiles.*,
+                    COUNT(watcher_profile_items.watcher_id) AS watcher_count
+                FROM workflow_watcher_profiles
+                INNER JOIN watcher_profiles ON watcher_profiles.id = workflow_watcher_profiles.profile_id
+                LEFT JOIN watcher_profile_items
+                    ON watcher_profile_items.profile_id = watcher_profiles.id
+                WHERE workflow_watcher_profiles.workflow_id = ?
+                GROUP BY watcher_profiles.id
+                ORDER BY watcher_profiles.name COLLATE NOCASE, watcher_profiles.id
+                """,
+                (workflow_id,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def save_workflow_profiles(self, workflow_id: int, profile_ids: list[int]) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM workflow_watcher_profiles WHERE workflow_id = ?", (workflow_id,))
+            for profile_id in profile_ids:
+                connection.execute(
+                    """
+                    INSERT INTO workflow_watcher_profiles (workflow_id, profile_id)
+                    VALUES (?, ?)
+                    """,
+                    (workflow_id, profile_id),
+                )
+
+    def resolve_profile_watchers(self, workflow_id: int) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    watchers.*,
+                    watcher_profiles.id AS profile_id,
+                    watcher_profiles.name AS profile_name
+                FROM workflow_watcher_profiles
+                INNER JOIN watcher_profiles
+                    ON watcher_profiles.id = workflow_watcher_profiles.profile_id
+                INNER JOIN watcher_profile_items
+                    ON watcher_profile_items.profile_id = watcher_profiles.id
+                INNER JOIN watchers
+                    ON watchers.id = watcher_profile_items.watcher_id
+                WHERE workflow_watcher_profiles.workflow_id = ?
+                  AND watcher_profiles.is_active = 1
+                  AND watchers.is_enabled = 1
+                ORDER BY watchers.priority ASC, watcher_profile_items.position ASC, watchers.id ASC
+                """,
+                (workflow_id,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
 
 class WatcherTelemetryRepository:
     def __init__(self, db: DatabaseManager) -> None:

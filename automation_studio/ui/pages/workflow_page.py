@@ -6,6 +6,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from automation_studio.models import definition_for
 from automation_studio.ui.step_editor import StepEditorDialog
+from automation_studio.ui.watcher_profile_dialog import WorkflowProfileAttachDialog
 from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 
 
@@ -235,11 +236,29 @@ class WorkflowPage(QtWidgets.QWidget):
 
         workflow_layout.addWidget(make_form_label("Linked Watchers"))
         self.watcher_list = QtWidgets.QListWidget()
-        self.watcher_list.setMinimumHeight(120)
+        self.watcher_list.setMinimumHeight(72)
+        self.watcher_list.setMaximumHeight(110)
         workflow_layout.addWidget(self.watcher_list)
+
+        profile_header = QtWidgets.QHBoxLayout()
+        profile_header.addWidget(make_form_label("Attached Watcher Profiles"))
+        profile_header.addStretch(1)
+        self.manage_profiles_button = make_button("Manage Profiles", "secondary")
+        profile_header.addWidget(self.manage_profiles_button)
+        workflow_layout.addLayout(profile_header)
+
+        self.profile_list = QtWidgets.QListWidget()
+        self.profile_list.setMinimumHeight(72)
+        self.profile_list.setMaximumHeight(110)
+        workflow_layout.addWidget(self.profile_list)
 
         workflow_layout.addWidget(make_form_label("Workflows"))
         self.workflow_list = QtWidgets.QListWidget()
+        self.workflow_list.setMinimumHeight(220)
+        self.workflow_list.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         workflow_layout.addWidget(self.workflow_list, 1)
         content.addWidget(workflow_card)
 
@@ -307,6 +326,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.workflow_export_button.clicked.connect(self.export_workflow_json)
         self.workflow_import_button.clicked.connect(self.import_workflow_json)
         self.workflow_delete_button.clicked.connect(self.delete_workflow)
+        self.manage_profiles_button.clicked.connect(self.manage_workflow_profiles)
         self.workflow_list.itemSelectionChanged.connect(self._on_workflow_selected)
 
         self.add_step_button.clicked.connect(self.open_new_step_dialog)
@@ -366,6 +386,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.workflow_name_input.clear()
         self.workflow_description_input.clear()
         self.watcher_list.clear()
+        self.profile_list.clear()
         self.steps_table.setRowCount(0)
         self._sync_step_actions()
         self.run_status_label.setText("พร้อมสร้าง workflow ใหม่")
@@ -478,18 +499,53 @@ class WorkflowPage(QtWidgets.QWidget):
 
     def load_linked_watchers(self) -> None:
         self.watcher_list.clear()
+        self.profile_list.clear()
         if not self.current_workflow_id:
             return
+        attached_profiles = self.watcher_service.list_profiles_for_workflow(self.current_workflow_id)
+        if not attached_profiles:
+            self.profile_list.addItem("No watcher profile templates attached.")
+        else:
+            for profile in attached_profiles:
+                state_label = "Active" if profile["is_active"] else "Inactive"
+                self.profile_list.addItem(
+                    f"{profile['name']} ({int(profile.get('watcher_count', 0) or 0)} watchers, {state_label})"
+                )
         linked_watchers = self.watcher_service.list_watchers_for_workflow(self.current_workflow_id)
         if not linked_watchers:
             self.watcher_list.addItem("No global or workflow watchers linked yet.")
             return
         for watcher in linked_watchers:
-            scope_label = "Global" if watcher["scope_type"] == "global" else "Workflow"
+            if watcher.get("source") == "profile":
+                scope_label = f"Profile: {watcher.get('profile_name') or watcher.get('profile_id')}"
+            else:
+                scope_label = "Global" if watcher["scope_type"] == "global" else "Workflow"
             state_label = "Enabled" if watcher["is_enabled"] else "Disabled"
             self.watcher_list.addItem(
                 f"[{scope_label}] {watcher['name']} - {watcher['condition_type']} -> {watcher['action_type']} ({state_label})"
             )
+
+    def manage_workflow_profiles(self) -> None:
+        if not self.current_workflow_id:
+            QtWidgets.QMessageBox.information(self, "Workflow Profiles", "Select a workflow first.")
+            return
+        dialog = WorkflowProfileAttachDialog(
+            profiles=self.watcher_service.list_profiles(),
+            selected_profile_ids=[
+                profile["id"] for profile in self.watcher_service.list_profiles_for_workflow(self.current_workflow_id)
+            ],
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.watcher_service.save_workflow_profiles(self.current_workflow_id, dialog.selected_ids())
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Save workflow profiles failed", str(exc))
+            return
+        self.load_linked_watchers()
+        self.logs_changed.emit()
+        self.run_status_label.setText("Workflow watcher profiles updated")
 
     def _selected_step(self) -> dict | None:
         if not self.current_step_id:
@@ -519,6 +575,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.move_down_button.setEnabled(has_step and 0 <= current_row < self.steps_table.rowCount() - 1)
         self.edit_step_button.setEnabled(has_step)
         self.delete_step_button.setEnabled(has_step)
+        self.manage_profiles_button.setEnabled(has_workflow)
         self.toggle_step_button.setText("Disable Selected" if has_step and step["is_enabled"] else "Enable Selected")
 
     def _persist_step_order(self, ordered_step_ids: list[int], moved_step_id: int) -> None:

@@ -176,6 +176,95 @@ class WatcherServiceTests(unittest.TestCase):
         self.assertEqual(summary[0]["success_rate"], 100.0)
         self.assertEqual(summary[0]["failure_rate"], 0.0)
 
+    def test_profile_watchers_can_be_attached_to_workflow(self) -> None:
+        popup_watcher_id = self.service.save_watcher(
+            None,
+            "Popup Guard",
+            "global",
+            None,
+            "selector_exists",
+            json.dumps({"text": "Allow", "timeout": 0}),
+            "press_back",
+            json.dumps({}),
+            json.dumps({"cooldown_seconds": 0, "active_stages": ["before_step"]}),
+            True,
+            15,
+        )
+        profile_id = self.service.save_profile(
+            None,
+            "Popup Recovery",
+            "Shared popup handlers",
+            [popup_watcher_id],
+            True,
+        )
+
+        self.service.save_workflow_profiles(self.workflow_id, [profile_id])
+
+        profiles = self.service.list_profiles_for_workflow(self.workflow_id)
+        self.assertEqual([profile["id"] for profile in profiles], [profile_id])
+        profile_watchers = self.service.list_profile_watchers(profile_id)
+        self.assertEqual([watcher["id"] for watcher in profile_watchers], [popup_watcher_id])
+
+    def test_resolve_active_watchers_dedupes_direct_and_profile_sources(self) -> None:
+        shared_watcher_id = self.service.save_watcher(
+            None,
+            "Shared Guard",
+            "workflow",
+            self.workflow_id,
+            "expression",
+            json.dumps({"expression": "True"}),
+            "set_variable",
+            json.dumps({"variable_name": "seen", "value": "1"}),
+            json.dumps({"cooldown_seconds": 0, "active_stages": ["before_step"]}),
+            True,
+            12,
+        )
+        self.service.save_watcher(
+            None,
+            "Global Guard",
+            "global",
+            None,
+            "elapsed_time",
+            json.dumps({"seconds": 0}),
+            "press_back",
+            json.dumps({}),
+            json.dumps({"cooldown_seconds": 0, "active_stages": ["before_step"]}),
+            True,
+            5,
+        )
+        profile_id = self.service.save_profile(
+            None,
+            "Shared Profile",
+            "Contains workflow watcher too",
+            [shared_watcher_id],
+            True,
+        )
+        self.service.save_workflow_profiles(self.workflow_id, [profile_id])
+
+        watchers = self.service.resolve_active_watchers(self.workflow_id, self.device_id)
+        shared_matches = [watcher for watcher in watchers if watcher["id"] == shared_watcher_id]
+        self.assertEqual(len(shared_matches), 1)
+        self.assertEqual(shared_matches[0]["id"], shared_watcher_id)
+
+    def test_profile_name_must_be_unique(self) -> None:
+        watcher_id = self.service.save_watcher(
+            None,
+            "Unique Guard",
+            "global",
+            None,
+            "expression",
+            json.dumps({"expression": "True"}),
+            "press_back",
+            json.dumps({}),
+            json.dumps({"cooldown_seconds": 0, "active_stages": ["before_step"]}),
+            True,
+            10,
+        )
+        self.service.save_profile(None, "Common Profile", "", [watcher_id], True)
+
+        with self.assertRaisesRegex(ValueError, "Profile name already exists"):
+            self.service.save_profile(None, "common profile", "", [watcher_id], True)
+
     def test_log_service_can_filter_by_watcher_id(self) -> None:
         self.log_service.add(self.workflow_id, self.device_id, "INFO", "watcher_matched", "Watcher one", {}, watcher_id=11)
         self.log_service.add(self.workflow_id, self.device_id, "INFO", "watcher_matched", "Watcher two", {}, watcher_id=22)

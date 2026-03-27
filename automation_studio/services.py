@@ -232,7 +232,22 @@ class WatcherService:
         self.watcher_repository.delete_watcher(watcher_id)
 
     def resolve_active_watchers(self, workflow_id: int, device_id: int) -> list[dict[str, Any]]:
-        return self.watcher_repository.resolve_active_watchers(workflow_id, device_id)
+        resolved: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for watcher in self.watcher_repository.resolve_active_watchers(workflow_id, device_id):
+            watcher_id = int(watcher["id"])
+            if watcher_id in seen_ids:
+                continue
+            seen_ids.add(watcher_id)
+            resolved.append(watcher)
+        for watcher in self.watcher_repository.resolve_profile_watchers(workflow_id):
+            watcher_id = int(watcher["id"])
+            if watcher_id in seen_ids:
+                continue
+            seen_ids.add(watcher_id)
+            resolved.append(watcher)
+        resolved.sort(key=lambda item: (int(item.get("priority", 100)), int(item["id"])))
+        return resolved
 
     def list_watchers_for_workflow(self, workflow_id: int) -> list[dict[str, Any]]:
         linked: list[dict[str, Any]] = []
@@ -240,8 +255,74 @@ class WatcherService:
             scope_type = str(watcher.get("scope_type") or "")
             scope_id = watcher.get("scope_id")
             if scope_type == "global" or (scope_type == "workflow" and int(scope_id or 0) == int(workflow_id)):
-                linked.append(watcher)
+                item = dict(watcher)
+                item["source"] = "direct"
+                linked.append(item)
+        for watcher in self.watcher_repository.resolve_profile_watchers(workflow_id):
+            item = dict(watcher)
+            item["source"] = "profile"
+            linked.append(item)
         return linked
+
+    def list_profiles(self) -> list[dict[str, Any]]:
+        return self.watcher_repository.list_profiles()
+
+    def get_profile(self, profile_id: int) -> dict[str, Any] | None:
+        return self.watcher_repository.get_profile(profile_id)
+
+    def save_profile(
+        self,
+        profile_id: int | None,
+        name: str,
+        description: str,
+        watcher_ids: list[int],
+        is_active: bool = True,
+    ) -> int:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("Profile name is required")
+        if not watcher_ids:
+            raise ValueError("Select at least one watcher for the profile")
+        duplicate_profile = next(
+            (
+                profile
+                for profile in self.list_profiles()
+                if str(profile.get("name") or "").strip().casefold() == normalized_name.casefold()
+                and int(profile["id"]) != int(profile_id or 0)
+            ),
+            None,
+        )
+        if duplicate_profile:
+            raise ValueError("Profile name already exists")
+        available_ids = {int(watcher["id"]) for watcher in self.list_watchers()}
+        invalid_ids = [watcher_id for watcher_id in watcher_ids if int(watcher_id) not in available_ids]
+        if invalid_ids:
+            raise ValueError(f"Unknown watcher ids in profile: {invalid_ids}")
+        saved_profile_id = self.watcher_repository.upsert_profile(
+            profile_id=profile_id,
+            name=normalized_name,
+            description=str(description or "").strip(),
+            is_active=is_active,
+        )
+        self.watcher_repository.save_profile_watchers(saved_profile_id, [int(watcher_id) for watcher_id in watcher_ids])
+        return saved_profile_id
+
+    def delete_profile(self, profile_id: int) -> None:
+        self.watcher_repository.delete_profile(profile_id)
+
+    def list_profile_watchers(self, profile_id: int) -> list[dict[str, Any]]:
+        return self.watcher_repository.list_profile_watchers(profile_id)
+
+    def list_profiles_for_workflow(self, workflow_id: int) -> list[dict[str, Any]]:
+        return self.watcher_repository.list_profiles_for_workflow(workflow_id)
+
+    def save_workflow_profiles(self, workflow_id: int, profile_ids: list[int]) -> None:
+        workflow_profile_ids = [int(profile_id) for profile_id in profile_ids]
+        available_ids = {int(profile["id"]) for profile in self.list_profiles()}
+        invalid_ids = [profile_id for profile_id in workflow_profile_ids if profile_id not in available_ids]
+        if invalid_ids:
+            raise ValueError(f"Unknown profile ids for workflow: {invalid_ids}")
+        self.watcher_repository.save_workflow_profiles(workflow_id, workflow_profile_ids)
 
     def test_condition(
         self,
