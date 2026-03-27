@@ -6,10 +6,25 @@ from pathlib import Path
 from PySide6 import QtCore, QtWidgets
 
 from automation_studio.database import DatabaseManager
-from automation_studio.repositories import DeviceRepository, LogRepository, TelemetryRepository, WorkflowRepository
-from automation_studio.services import DeviceService, LogService, TelemetryService, WorkflowService
+from automation_studio.repositories import (
+    DeviceRepository,
+    LogRepository,
+    TelemetryRepository,
+    WatcherRepository,
+    WatcherTelemetryRepository,
+    WorkflowRepository,
+)
+from automation_studio.services import (
+    DeviceService,
+    LogService,
+    TelemetryService,
+    WatcherService,
+    WatcherTelemetryService,
+    WorkflowService,
+)
 from automation_studio.ui.pages.devices_page import DevicesPage
 from automation_studio.ui.pages.log_page import LogPage
+from automation_studio.ui.pages.watchers_page import WatchersPage
 from automation_studio.ui.pages.workflow_page import WorkflowPage
 from automation_studio.ui.theme import APP_STYLESHEET
 
@@ -31,16 +46,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_repository = WorkflowRepository(self.db)
         self.log_repository = LogRepository(self.db)
         self.telemetry_repository = TelemetryRepository(self.db)
+        self.watcher_repository = WatcherRepository(self.db)
+        self.watcher_telemetry_repository = WatcherTelemetryRepository(self.db)
 
         self.device_service = DeviceService(self.device_repository)
         self.log_service = LogService(self.log_repository)
         self.telemetry_service = TelemetryService(self.telemetry_repository)
+        self.watcher_telemetry_service = WatcherTelemetryService(self.watcher_telemetry_repository)
+        self.watcher_service = WatcherService(
+            self.watcher_repository,
+            self.device_repository,
+            self.device_service,
+            self.log_service,
+            self.watcher_telemetry_service,
+        )
         self.workflow_service = WorkflowService(
             self.workflow_repository,
             self.device_repository,
             self.device_service,
             self.log_service,
             self.telemetry_service,
+            self.watcher_service,
+            self.watcher_telemetry_service,
         )
 
     def _build_ui(self) -> None:
@@ -63,7 +90,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.nav_list = QtWidgets.QListWidget()
         self.nav_list.setObjectName("navList")
-        self.nav_list.addItems(["Devices", "Workflow", "Log"])
+        self.nav_list.addItems(["Devices", "Workflow", "Watchers", "Log"])
         self.nav_list.setCurrentRow(0)
         nav_layout.addWidget(self.nav_list, 1)
 
@@ -80,25 +107,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.stack = QtWidgets.QStackedWidget()
         self.devices_page = DevicesPage(self.device_service)
-        self.workflow_page = WorkflowPage(self.workflow_service, self.device_service)
+        self.workflow_page = WorkflowPage(self.workflow_service, self.device_service, self.watcher_service)
+        self.watchers_page = WatchersPage(
+            self.watcher_service,
+            self.workflow_service,
+            self.device_service,
+        )
         self.log_page = LogPage(
             self.log_service,
             self.workflow_service,
             self.device_service,
+            self.watcher_service,
             self.telemetry_service,
+            self.watcher_telemetry_service,
         )
 
         self.stack.addWidget(self.devices_page)
         self.stack.addWidget(self.workflow_page)
+        self.stack.addWidget(self.watchers_page)
         self.stack.addWidget(self.log_page)
         content_layout.addWidget(self.stack)
         layout.addWidget(content, 1)
 
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.devices_page.devices_changed.connect(self.workflow_page.refresh_devices)
+        self.devices_page.devices_changed.connect(self.watchers_page.load_watchers)
         self.devices_page.devices_changed.connect(self.log_page.refresh_filters)
         self.workflow_page.workflows_changed.connect(self.log_page.refresh_filters)
+        self.workflow_page.workflows_changed.connect(self.watchers_page.load_watchers)
         self.workflow_page.logs_changed.connect(self.log_page.load_logs)
+        self.watchers_page.watchers_changed.connect(self.log_page.refresh_filters)
+        self.watchers_page.watchers_changed.connect(self.workflow_page.load_linked_watchers)
+        self.watchers_page.logs_changed.connect(self.log_page.load_logs)
 
 
 def main() -> None:

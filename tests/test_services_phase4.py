@@ -10,9 +10,18 @@ from automation_studio.repositories import (
     DeviceRepository,
     LogRepository,
     TelemetryRepository,
+    WatcherRepository,
+    WatcherTelemetryRepository,
     WorkflowRepository,
 )
-from automation_studio.services import DeviceService, LogService, TelemetryService, WorkflowService
+from automation_studio.services import (
+    DeviceService,
+    LogService,
+    TelemetryService,
+    WatcherService,
+    WatcherTelemetryService,
+    WorkflowService,
+)
 
 
 class ServicePhase4Tests(unittest.TestCase):
@@ -25,12 +34,26 @@ class ServicePhase4Tests(unittest.TestCase):
         self.device_repository = DeviceRepository(self.db)
         self.log_repository = LogRepository(self.db)
         self.telemetry_repository = TelemetryRepository(self.db)
+        self.watcher_repository = WatcherRepository(self.db)
+        self.watcher_telemetry_repository = WatcherTelemetryRepository(self.db)
+        self.log_service = LogService(self.log_repository)
+        self.telemetry_service = TelemetryService(self.telemetry_repository)
+        self.watcher_telemetry_service = WatcherTelemetryService(self.watcher_telemetry_repository)
+        self.watcher_service = WatcherService(
+            self.watcher_repository,
+            self.device_repository,
+            DeviceService(self.device_repository),
+            self.log_service,
+            self.watcher_telemetry_service,
+        )
         self.service = WorkflowService(
             self.workflow_repository,
             self.device_repository,
             DeviceService(self.device_repository),
-            LogService(self.log_repository),
-            TelemetryService(self.telemetry_repository),
+            self.log_service,
+            self.telemetry_service,
+            self.watcher_service,
+            self.watcher_telemetry_service,
         )
 
     def tearDown(self) -> None:

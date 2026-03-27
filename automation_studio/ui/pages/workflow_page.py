@@ -168,10 +168,11 @@ class WorkflowPage(QtWidgets.QWidget):
     workflows_changed = QtCore.Signal()
     logs_changed = QtCore.Signal()
 
-    def __init__(self, workflow_service, device_service, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, workflow_service, device_service, watcher_service, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.workflow_service = workflow_service
         self.device_service = device_service
+        self.watcher_service = watcher_service
         self.current_workflow_id: int | None = None
         self.current_step_id: int | None = None
         self.current_steps: list[dict] = []
@@ -231,6 +232,11 @@ class WorkflowPage(QtWidgets.QWidget):
         self.workflow_description_input = QtWidgets.QTextEdit()
         self.workflow_description_input.setFixedHeight(90)
         workflow_layout.addWidget(self.workflow_description_input)
+
+        workflow_layout.addWidget(make_form_label("Linked Watchers"))
+        self.watcher_list = QtWidgets.QListWidget()
+        self.watcher_list.setMinimumHeight(120)
+        workflow_layout.addWidget(self.watcher_list)
 
         workflow_layout.addWidget(make_form_label("Workflows"))
         self.workflow_list = QtWidgets.QListWidget()
@@ -348,6 +354,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.current_workflow_id = workflow_id
         self.workflow_name_input.setText(workflow["name"])
         self.workflow_description_input.setPlainText(workflow.get("description", ""))
+        self.load_linked_watchers()
         self.load_steps()
         self.run_status_label.setText("พร้อมรัน workflow หรือเพิ่ม step ใหม่")
 
@@ -358,6 +365,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.workflow_list.clearSelection()
         self.workflow_name_input.clear()
         self.workflow_description_input.clear()
+        self.watcher_list.clear()
         self.steps_table.setRowCount(0)
         self._sync_step_actions()
         self.run_status_label.setText("พร้อมสร้าง workflow ใหม่")
@@ -372,6 +380,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.current_workflow_id = workflow_id
         self.load_workflows()
         self._select_workflow_item(workflow_id)
+        self.load_linked_watchers()
         self.run_status_label.setText("บันทึก workflow เรียบร้อย")
 
     def _select_workflow_item(self, workflow_id: int) -> None:
@@ -466,6 +475,21 @@ class WorkflowPage(QtWidgets.QWidget):
         self.steps_table.clearSelection()
         self.steps_table.resizeColumnsToContents()
         self._sync_step_actions()
+
+    def load_linked_watchers(self) -> None:
+        self.watcher_list.clear()
+        if not self.current_workflow_id:
+            return
+        linked_watchers = self.watcher_service.list_watchers_for_workflow(self.current_workflow_id)
+        if not linked_watchers:
+            self.watcher_list.addItem("No global or workflow watchers linked yet.")
+            return
+        for watcher in linked_watchers:
+            scope_label = "Global" if watcher["scope_type"] == "global" else "Workflow"
+            state_label = "Enabled" if watcher["is_enabled"] else "Disabled"
+            self.watcher_list.addItem(
+                f"[{scope_label}] {watcher['name']} - {watcher['condition_type']} -> {watcher['action_type']} ({state_label})"
+            )
 
     def _selected_step(self) -> dict | None:
         if not self.current_step_id:

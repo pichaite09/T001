@@ -27,12 +27,16 @@ class WorkflowExecutor:
         device_record: dict[str, Any],
         log_service: Any,
         telemetry_service: Any | None = None,
+        watchers: list[dict[str, Any]] | None = None,
+        watcher_telemetry_service: Any | None = None,
     ) -> None:
         self.device = device
         self.workflow = workflow
         self.device_record = device_record
         self.log_service = log_service
         self.telemetry_service = telemetry_service
+        self.watchers = sorted(watchers or [], key=lambda item: (int(item.get("priority", 100)), int(item.get("id", 0))))
+        self.watcher_telemetry_service = watcher_telemetry_service
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_artifact_dir = (
             Path("artifacts")
@@ -50,6 +54,13 @@ class WorkflowExecutor:
                 "started_at": datetime.now().isoformat(timespec="seconds"),
             },
         }
+        self._watcher_runtime: dict[int, dict[str, Any]] = {}
+        self._watcher_action_depth = 0
+        self._stop_requested = False
+        self._stop_reason = ""
+        self._watcher_total_triggers = 0
+        self._watcher_trigger_limit = max(50, len(self.watchers) * 20) if self.watchers else 0
+        self._watcher_chain_limit = 10
 
     def run(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
         ordered_steps = sorted(steps, key=lambda item: (int(item["position"]), int(item["id"])))
@@ -78,6 +89,9 @@ class WorkflowExecutor:
 
             step = ordered_steps[index]
             runtime = {"step": step, "repeat_iteration": 1, "repeat_times": 1}
+            self._poll_watchers("before_step", step, runtime)
+            if self._stop_requested:
+                break
             if not step["is_enabled"]:
                 self._log("INFO", "step_skipped", f"Skip disabled step: {step['name']}", step, {})
                 self._record_telemetry(step, "skipped", 0, "")
@@ -106,6 +120,9 @@ class WorkflowExecutor:
                 self._record_telemetry(step, "skipped", 0, "")
                 summary["skipped_conditions"] += 1
                 index += 1
+                self._poll_watchers("after_step", step, runtime)
+                if self._stop_requested:
+                    break
                 continue
 
             repeat_times = int(flow.get("repeat_times", 1) or 1)
@@ -126,13 +143,17 @@ class WorkflowExecutor:
                     if repeat_iteration < repeat_times:
                         delay_seconds = float(flow.get("repeat_delay_seconds", 0) or 0)
                         if delay_seconds > 0:
-                            time.sleep(delay_seconds)
+                            self._sleep_with_watchers(delay_seconds, step, runtime)
                     continue
 
                 if result["status"] == "continued_failure":
                     summary["continued_failures"] += 1
                 elif result["status"] == "skipped_failure":
                     summary["skipped_failures"] += 1
+                break
+
+            self._poll_watchers("after_step", step, runtime)
+            if self._stop_requested:
                 break
 
             next_index = index + 1
@@ -147,6 +168,11 @@ class WorkflowExecutor:
 
         summary["context_variables"] = len(self.context["vars"])
         summary["transition_count"] = transitions
+        summary["watcher_count"] = len(self.watchers)
+        summary["watcher_trigger_count"] = self._watcher_total_triggers
+        summary["watcher_trigger_limit"] = self._watcher_trigger_limit
+        summary["stopped_by_watcher"] = self._stop_requested
+        summary["stop_reason"] = self._stop_reason
         return summary
 
     def execute_step(
@@ -263,7 +289,7 @@ class WorkflowExecutor:
                         retry_metadata,
                     )
                     if retry_delay > 0:
-                        time.sleep(retry_delay)
+                        self._sleep_with_watchers(retry_delay, step, runtime)
                     continue
 
                 failure_artifacts = self._capture_failure_artifacts(step, step_artifact_dir, policy)
@@ -376,6 +402,363 @@ class WorkflowExecutor:
 
         return metadata
 
+    def _poll_watchers(self, stage: str, step: dict[str, Any] | None, runtime: dict[str, Any]) -> None:
+        if not self.watchers or self._watcher_action_depth > 0 or self._stop_requested:
+            return
+
+        for watcher in self.watchers:
+            watcher_id = int(watcher.get("id", 0) or 0)
+            state = self._watcher_runtime.setdefault(
+                watcher_id,
+                {
+                    "trigger_count": 0,
+                    "last_triggered_at": 0.0,
+                    "consecutive_matches": 0,
+                },
+            )
+            policy = self._watcher_policy(watcher)
+            active_stages = {str(item) for item in policy.get("active_stages", [])}
+            if stage not in active_stages:
+                continue
+
+            max_triggers_per_run = int(policy.get("max_triggers_per_run", 0) or 0)
+            if max_triggers_per_run and int(state.get("trigger_count", 0)) >= max_triggers_per_run:
+                continue
+
+            cooldown_seconds = float(policy.get("cooldown_seconds", 0) or 0)
+            last_triggered_at = float(state.get("last_triggered_at", 0.0) or 0.0)
+            if cooldown_seconds > 0 and (time.monotonic() - last_triggered_at) < cooldown_seconds:
+                continue
+
+            matched, condition_metadata = self._watcher_matches(watcher, stage, step, runtime, state)
+            if not matched:
+                state["consecutive_matches"] = 0
+                continue
+
+            state["consecutive_matches"] = int(state.get("consecutive_matches", 0)) + 1
+            debounce_count = max(1, int(policy.get("debounce_count", 1) or 1))
+            if int(state["consecutive_matches"]) < debounce_count:
+                continue
+
+            state["consecutive_matches"] = 0
+            state["trigger_count"] = int(state.get("trigger_count", 0)) + 1
+            state["last_triggered_at"] = time.monotonic()
+            self._watcher_total_triggers += 1
+            if self._watcher_trigger_limit and self._watcher_total_triggers > self._watcher_trigger_limit:
+                self._stop_requested = True
+                self._stop_reason = (
+                    f"Watcher safety stop: exceeded {self._watcher_trigger_limit} watcher triggers in one run"
+                )
+                self._log_watcher(
+                    "ERROR",
+                    "watcher_safety_stop",
+                    self._stop_reason,
+                    watcher,
+                    step,
+                    {
+                        "stage": stage,
+                        "watcher_trigger_limit": self._watcher_trigger_limit,
+                        "watcher_trigger_count": self._watcher_total_triggers,
+                    },
+                )
+                break
+            self._log_watcher(
+                "INFO",
+                "watcher_matched",
+                f"Watcher matched: {watcher['name']}",
+                watcher,
+                step,
+                {
+                        "stage": stage,
+                        "condition_type": watcher["condition_type"],
+                        "trigger_count": state["trigger_count"],
+                        "total_watcher_triggers": self._watcher_total_triggers,
+                        "debounce_count": debounce_count,
+                        **condition_metadata,
+                    },
+            )
+
+            try:
+                action_metadata = self._execute_watcher_action(watcher, step, runtime, condition_metadata)
+                self._record_watcher_telemetry(watcher_id, "success", "")
+                self._log_watcher(
+                    "INFO",
+                    "watcher_action_success",
+                    f"Watcher action completed: {watcher['name']}",
+                    watcher,
+                    step,
+                    {
+                        "stage": stage,
+                        "action_type": watcher["action_type"],
+                        **action_metadata,
+                    },
+                )
+            except Exception as exc:
+                error_message = str(exc)
+                self._record_watcher_telemetry(watcher_id, "failure", error_message)
+                self._log_watcher(
+                    "ERROR",
+                    "watcher_action_failed",
+                    f"Watcher action failed: {watcher['name']}",
+                    watcher,
+                    step,
+                    {
+                        "stage": stage,
+                        "action_type": watcher["action_type"],
+                        "error": error_message,
+                    },
+                )
+                continue
+
+            match_mode = str(policy.get("match_mode", "first_match") or "first_match")
+            if bool(policy.get("stop_after_match")) or match_mode == "first_match":
+                break
+
+    def _watcher_policy(self, watcher: dict[str, Any]) -> dict[str, Any]:
+        policy = {
+            "cooldown_seconds": 3.0,
+            "debounce_count": 1,
+            "max_triggers_per_run": 0,
+            "stop_after_match": False,
+            "match_mode": "first_match",
+            "active_stages": ["before_step", "after_step", "during_wait"],
+        }
+        policy.update(self._parse_parameters(watcher.get("policy_json") or "{}"))
+        return policy
+
+    def _watcher_matches(
+        self,
+        watcher: dict[str, Any],
+        stage: str,
+        step: dict[str, Any] | None,
+        runtime: dict[str, Any],
+        state: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        condition = self._parse_parameters(watcher.get("condition_json") or "{}")
+        condition_type = str(watcher.get("condition_type") or "")
+
+        if condition_type in {"selector_exists", "text_exists", "selector_gone", "text_contains"}:
+            target_type, target, timeout = self._selector(condition)
+            if not target:
+                return False, {}
+            if timeout > 0 and condition_type in {"selector_exists", "text_exists", "text_contains"}:
+                exists = self._wait_on_target(target_type, target, timeout)
+            else:
+                exists = self._target_exists_now(target_type, target)
+
+            if condition_type == "selector_gone":
+                return (not exists), {"selector_type": target_type}
+
+            if not exists:
+                return False, {}
+
+            if condition_type == "text_contains":
+                expected_text = str(condition.get("expected_text", "") or "")
+                actual_text = str(self._read_target_value(target_type, target, "text") or "")
+                return expected_text in actual_text, {
+                    "selector_type": target_type,
+                    "expected_text": expected_text,
+                    "actual_text": actual_text,
+                }
+
+            return True, {"selector_type": target_type}
+
+        if condition_type == "app_in_foreground":
+            package = str(condition.get("package", "") or "")
+            current = self.device.app_current() if hasattr(self.device, "app_current") else {}
+            current_package = str(current.get("package") or current.get("packageName") or "")
+            return current_package == package, {"current_package": current_package}
+
+        if condition_type == "package_changed":
+            target_package = str(condition.get("package", "") or "")
+            current = self.device.app_current() if hasattr(self.device, "app_current") else {}
+            current_package = str(current.get("package") or current.get("packageName") or "")
+            previous_package = state.get("last_package")
+            state["last_package"] = current_package
+            if previous_package is None:
+                return False, {"current_package": current_package}
+            changed = current_package != previous_package
+            if target_package:
+                changed = changed and current_package == target_package
+            return changed, {"previous_package": previous_package, "current_package": current_package}
+
+        if condition_type == "elapsed_time":
+            seconds = float(condition.get("seconds", 0) or 0)
+            started_at_text = str(self.context["run"]["started_at"])
+            started_at = datetime.fromisoformat(started_at_text)
+            elapsed = max((datetime.now() - started_at).total_seconds(), 0.0)
+            return elapsed >= seconds, {"elapsed_seconds": round(elapsed, 3)}
+
+        if condition_type == "variable_changed":
+            variable_name = str(condition.get("variable_name", "") or "")
+            current_value = self.context["vars"].get(variable_name)
+            previous_value = state.get("last_variable_value")
+            state["last_variable_value"] = current_value
+            if previous_value is None:
+                return False, {"variable_name": variable_name, "current_value": current_value}
+            return previous_value != current_value, {
+                "variable_name": variable_name,
+                "previous_value": previous_value,
+                "current_value": current_value,
+            }
+
+        if condition_type == "expression":
+            expression = str(condition.get("expression", "") or "")
+            matched = self._truthy(self._evaluate_expression(expression, step=step, parameters=condition, runtime=runtime))
+            return matched, {"expression": expression}
+
+        return False, {}
+
+    def _execute_watcher_action(
+        self,
+        watcher: dict[str, Any],
+        step: dict[str, Any] | None,
+        runtime: dict[str, Any],
+        condition_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        action = self._parse_parameters(watcher.get("action_json") or "{}")
+        action_type = str(watcher.get("action_type") or "")
+
+        if action_type == "run_step":
+            action_step_type = str(action.get("step_type", "") or "").strip()
+            action_parameters = action.get("parameters", {})
+            if not isinstance(action_parameters, dict):
+                raise RuntimeError("Watcher run_step parameters must be an object")
+            pseudo_step = {
+                "id": f"watcher_{watcher['id']}",
+                "name": f"[Watcher] {watcher['name']}",
+                "step_type": action_step_type,
+                "position": 0,
+            }
+            pseudo_runtime = {"step": pseudo_step, "repeat_iteration": 1, "repeat_times": 1}
+            resolved_parameters = self._resolve_step_parameters(action_step_type, action_parameters, pseudo_step, pseudo_runtime)
+            self._watcher_action_depth += 1
+            try:
+                result = self.execute_step(pseudo_step, resolved_parameters, pseudo_runtime)
+            finally:
+                self._watcher_action_depth -= 1
+            return {"action_step_type": action_step_type, "result": result, **condition_metadata}
+
+        if action_type == "action_chain":
+            actions = action.get("actions", [])
+            if isinstance(actions, str):
+                actions = json.loads(actions)
+            if not isinstance(actions, list):
+                raise RuntimeError("Watcher action_chain actions must be a list")
+            if len(actions) > self._watcher_chain_limit:
+                raise RuntimeError(
+                    f"Watcher action_chain exceeds safety limit of {self._watcher_chain_limit} actions"
+                )
+            chain_results: list[dict[str, Any]] = []
+            for index, item in enumerate(actions, start=1):
+                if not isinstance(item, dict):
+                    raise RuntimeError(f"Watcher action_chain entry #{index} must be an object")
+                nested_watcher = dict(watcher)
+                nested_watcher["action_type"] = item.get("action_type")
+                nested_watcher["action_json"] = json.dumps(item.get("action", {}), ensure_ascii=False)
+                chain_results.append(self._execute_watcher_action(nested_watcher, step, runtime, condition_metadata))
+            return {"chain_length": len(chain_results), "chain_results": chain_results, **condition_metadata}
+
+        if action_type == "press_back":
+            self.device.press("back")
+            return {"pressed_key": "back", **condition_metadata}
+
+        if action_type == "take_screenshot":
+            prefix = str(action.get("filename_prefix") or "watcher_event")
+            directory = self.run_artifact_dir / "watchers"
+            directory.mkdir(parents=True, exist_ok=True)
+            file_path = directory / f"{prefix}_{int(time.time())}.png"
+            self.device.screenshot(str(file_path))
+            return {"artifact_path": str(file_path), **condition_metadata}
+
+        if action_type == "dump_hierarchy":
+            prefix = str(action.get("filename_prefix") or "watcher_view")
+            directory = self.run_artifact_dir / "watchers"
+            directory.mkdir(parents=True, exist_ok=True)
+            file_path = directory / f"{prefix}_{int(time.time())}.xml"
+            xml = self.device.dump_hierarchy()
+            file_path.write_text(xml, encoding="utf-8")
+            return {"artifact_path": str(file_path), **condition_metadata}
+
+        if action_type == "set_variable":
+            variable_name = str(action.get("variable_name") or "").strip()
+            self.context["vars"][variable_name] = action.get("value")
+            return {"variable_name": variable_name, "stored_value": action.get("value"), **condition_metadata}
+
+        if action_type == "stop_workflow":
+            self._stop_requested = True
+            self._stop_reason = str(action.get("reason") or f"Watcher '{watcher['name']}' stopped the workflow")
+            return {"stop_reason": self._stop_reason, **condition_metadata}
+
+        raise RuntimeError(f"Unsupported watcher action: {action_type}")
+
+    def _record_watcher_telemetry(self, watcher_id: int, outcome: str, error_message: str) -> None:
+        if not self.watcher_telemetry_service:
+            return
+        self.watcher_telemetry_service.record_watcher_result(
+            watcher_id=watcher_id,
+            workflow_id=self.workflow["id"],
+            device_id=self.device_record["id"],
+            outcome=outcome,
+            error_message=error_message,
+        )
+
+    def _log_watcher(
+        self,
+        level: str,
+        status: str,
+        message: str,
+        watcher: dict[str, Any],
+        step: dict[str, Any] | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        payload = {
+            "watcher_id": watcher["id"],
+            "watcher_name": watcher["name"],
+            "scope_type": watcher["scope_type"],
+            "scope_id": watcher.get("scope_id"),
+            "run_id": self.run_id,
+        }
+        if step:
+            payload.update(
+                {
+                    "step_id": step.get("id"),
+                    "step_name": step.get("name"),
+                    "step_type": step.get("step_type"),
+                    "position": step.get("position"),
+                }
+            )
+        payload.update(metadata)
+        self.log_service.add(
+            self.workflow["id"],
+            self.device_record["id"],
+            level,
+            status,
+            message,
+            payload,
+        )
+
+    def _sleep_with_watchers(
+        self,
+        seconds: float,
+        step: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> None:
+        remaining = max(float(seconds), 0.0)
+        if remaining <= 0:
+            return
+        if not self.watchers or self._watcher_action_depth > 0:
+            time.sleep(remaining)
+            return
+        interval = 0.2
+        while remaining > 0:
+            chunk = min(interval, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+            self._poll_watchers("during_wait", step, runtime)
+            if self._stop_requested:
+                break
+
     def _step_artifact_dir(self, step: dict[str, Any]) -> Path:
         safe_name = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in step["name"])
         return self.run_artifact_dir / f"{int(step['position']):03d}_{safe_name}"
@@ -445,6 +828,8 @@ class WorkflowExecutor:
         desired_state: str,
         timeout: float,
         poll_interval_seconds: float,
+        step: dict[str, Any] | None = None,
+        runtime: dict[str, Any] | None = None,
     ) -> bool:
         if desired_state == "exists":
             return self._wait_on_target(target_type, target, timeout)
@@ -453,7 +838,12 @@ class WorkflowExecutor:
         while time.time() <= deadline:
             if not self._target_exists_now(target_type, target):
                 return True
-            time.sleep(poll_interval_seconds)
+            if step and runtime:
+                self._sleep_with_watchers(poll_interval_seconds, step, runtime)
+                if self._stop_requested:
+                    return False
+            else:
+                time.sleep(poll_interval_seconds)
         return False
 
     def _extract_target_info(self, target_type: str | None, target: Any) -> dict[str, Any]:
@@ -699,14 +1089,14 @@ class WorkflowExecutor:
 
     def _wait(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         seconds = float(parameters.get("seconds", 1))
-        time.sleep(seconds)
+        self._sleep_with_watchers(seconds, runtime["step"], runtime)
         return {"seconds": seconds}
 
     def _random_wait(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         min_seconds = float(parameters.get("min_seconds", 0))
         max_seconds = float(parameters.get("max_seconds", min_seconds))
         actual_seconds = random.uniform(min_seconds, max_seconds)
-        time.sleep(actual_seconds)
+        self._sleep_with_watchers(actual_seconds, runtime["step"], runtime)
         return {
             "min_seconds": min_seconds,
             "max_seconds": max_seconds,
@@ -727,7 +1117,15 @@ class WorkflowExecutor:
             raise RuntimeError("wait_for_element requires text, resource_id, xpath or description")
         desired_state = str(parameters.get("desired_state", "exists") or "exists")
         poll_interval_seconds = float(parameters.get("poll_interval_seconds", 0.5))
-        if not self._wait_for_target_state(target_type, target, desired_state, timeout, poll_interval_seconds):
+        if not self._wait_for_target_state(
+            target_type,
+            target,
+            desired_state,
+            timeout,
+            poll_interval_seconds,
+            runtime["step"],
+            runtime,
+        ):
             raise RuntimeError(f"Target did not reach state '{desired_state}' within timeout")
         return {"selector_type": target_type, "desired_state": desired_state}
 

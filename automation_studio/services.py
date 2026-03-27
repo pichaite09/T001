@@ -8,12 +8,21 @@ from typing import Any
 from automation_studio.automation.engine import WorkflowExecutor
 from automation_studio.models import (
     STEP_SCHEMA_VERSION,
+    default_watcher_policy,
     WORKFLOW_DEFINITION_VERSION,
     migrate_step_parameters,
     validate_step_parameters,
+    validate_watcher_config,
     validate_workflow_structure,
 )
-from automation_studio.repositories import DeviceRepository, LogRepository, TelemetryRepository, WorkflowRepository
+from automation_studio.repositories import (
+    DeviceRepository,
+    LogRepository,
+    TelemetryRepository,
+    WatcherRepository,
+    WatcherTelemetryRepository,
+    WorkflowRepository,
+)
 
 
 class DeviceService:
@@ -74,17 +83,19 @@ class LogService:
         status: str,
         message: str,
         metadata: dict[str, Any] | None = None,
+        watcher_id: int | None = None,
     ) -> int:
-        return self.log_repository.add_log(workflow_id, device_id, level, status, message, metadata)
+        return self.log_repository.add_log(workflow_id, device_id, level, status, message, metadata, watcher_id)
 
     def list_logs(
         self,
         workflow_id: int | None = None,
         device_id: int | None = None,
+        watcher_id: int | None = None,
         status: str | None = None,
         limit: int = 300,
         ) -> list[dict[str, Any]]:
-        return self.log_repository.list_logs(workflow_id, device_id, status, limit)
+        return self.log_repository.list_logs(workflow_id, device_id, watcher_id, status, limit)
 
 
 class TelemetryService:
@@ -118,6 +129,202 @@ class TelemetryService:
         return self.telemetry_repository.summary(workflow_id=workflow_id, device_id=device_id, limit=limit)
 
 
+class WatcherTelemetryService:
+    def __init__(self, watcher_telemetry_repository: WatcherTelemetryRepository) -> None:
+        self.watcher_telemetry_repository = watcher_telemetry_repository
+
+    def record_watcher_result(
+        self,
+        watcher_id: int,
+        workflow_id: int | None,
+        device_id: int | None,
+        outcome: str,
+        error_message: str = "",
+    ) -> None:
+        self.watcher_telemetry_repository.record_watcher_result(
+            watcher_id=watcher_id,
+            workflow_id=workflow_id,
+            device_id=device_id,
+            outcome=outcome,
+            error_message=error_message,
+        )
+
+    def summary(
+        self,
+        workflow_id: int | None = None,
+        device_id: int | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        return self.watcher_telemetry_repository.summary(
+            workflow_id=workflow_id,
+            device_id=device_id,
+            limit=limit,
+        )
+
+
+class WatcherService:
+    def __init__(
+        self,
+        watcher_repository: WatcherRepository,
+        device_repository: DeviceRepository,
+        device_service: DeviceService | None,
+        log_service: LogService,
+        watcher_telemetry_service: WatcherTelemetryService,
+    ) -> None:
+        self.watcher_repository = watcher_repository
+        self.device_repository = device_repository
+        self.device_service = device_service
+        self.log_service = log_service
+        self.watcher_telemetry_service = watcher_telemetry_service
+
+    def list_watchers(self) -> list[dict[str, Any]]:
+        return self.watcher_repository.list_watchers()
+
+    def get_watcher(self, watcher_id: int) -> dict[str, Any] | None:
+        return self.watcher_repository.get_watcher(watcher_id)
+
+    def save_watcher(
+        self,
+        watcher_id: int | None,
+        name: str,
+        scope_type: str,
+        scope_id: int | None,
+        condition_type: str,
+        condition_text: str,
+        action_type: str,
+        action_text: str,
+        policy_text: str,
+        is_enabled: bool = True,
+        priority: int = 100,
+    ) -> int:
+        condition = json.loads(condition_text or "{}")
+        action = json.loads(action_text or "{}")
+        policy = default_watcher_policy()
+        policy.update(json.loads(policy_text or "{}"))
+        normalized_scope_id = None if scope_type == "global" else int(scope_id) if scope_id else None
+        errors = validate_watcher_config(
+            name=name,
+            scope_type=scope_type,
+            scope_id=normalized_scope_id,
+            condition_type=condition_type,
+            condition=condition,
+            action_type=action_type,
+            action=action,
+            policy=policy,
+        )
+        if errors:
+            raise ValueError("\n".join(errors))
+        return self.watcher_repository.upsert_watcher(
+            watcher_id=watcher_id,
+            name=name.strip(),
+            scope_type=scope_type,
+            scope_id=normalized_scope_id,
+            condition_type=condition_type,
+            condition_json=json.dumps(condition, indent=2, ensure_ascii=False),
+            action_type=action_type,
+            action_json=json.dumps(action, indent=2, ensure_ascii=False),
+            policy_json=json.dumps(policy, indent=2, ensure_ascii=False),
+            is_enabled=is_enabled,
+            priority=priority,
+        )
+
+    def delete_watcher(self, watcher_id: int) -> None:
+        self.watcher_repository.delete_watcher(watcher_id)
+
+    def resolve_active_watchers(self, workflow_id: int, device_id: int) -> list[dict[str, Any]]:
+        return self.watcher_repository.resolve_active_watchers(workflow_id, device_id)
+
+    def list_watchers_for_workflow(self, workflow_id: int) -> list[dict[str, Any]]:
+        linked: list[dict[str, Any]] = []
+        for watcher in self.list_watchers():
+            scope_type = str(watcher.get("scope_type") or "")
+            scope_id = watcher.get("scope_id")
+            if scope_type == "global" or (scope_type == "workflow" and int(scope_id or 0) == int(workflow_id)):
+                linked.append(watcher)
+        return linked
+
+    def test_condition(
+        self,
+        device_id: int,
+        condition_type: str,
+        condition_text: str,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        device_record = self.device_repository.get_device(device_id)
+        if not device_record:
+            raise ValueError("Device not found")
+        if not self.device_service:
+            raise RuntimeError("Device service is not available")
+        device = self.device_service.connect_device(device_record["serial"])
+        executor = WorkflowExecutor(
+            device=device,
+            workflow={"id": 0, "name": "Watcher Test"},
+            device_record=device_record,
+            log_service=self.log_service,
+        )
+        watcher = {
+            "id": 0,
+            "name": "Watcher Condition Test",
+            "scope_type": "device",
+            "scope_id": device_id,
+            "condition_type": condition_type,
+            "condition_json": condition_text,
+            "action_type": "press_back",
+            "action_json": "{}",
+            "policy_json": json.dumps(default_watcher_policy(), ensure_ascii=False),
+        }
+        runtime = {
+            "step": {"id": 0, "name": "Watcher Condition Test", "step_type": "watcher_test", "position": 0},
+            "repeat_iteration": 1,
+            "repeat_times": 1,
+        }
+        matched, metadata = executor._watcher_matches(
+            watcher,
+            "before_step",
+            runtime["step"],
+            runtime,
+            {"trigger_count": 0, "last_triggered_at": 0.0, "consecutive_matches": 0},
+        )
+        message = "Condition matched on selected device" if matched else "Condition did not match on selected device"
+        return matched, message, metadata
+
+    def test_action(
+        self,
+        device_id: int,
+        action_type: str,
+        action_text: str,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        device_record = self.device_repository.get_device(device_id)
+        if not device_record:
+            raise ValueError("Device not found")
+        if not self.device_service:
+            raise RuntimeError("Device service is not available")
+        device = self.device_service.connect_device(device_record["serial"])
+        executor = WorkflowExecutor(
+            device=device,
+            workflow={"id": 0, "name": "Watcher Test"},
+            device_record=device_record,
+            log_service=self.log_service,
+        )
+        watcher = {
+            "id": 0,
+            "name": "Watcher Action Test",
+            "scope_type": "device",
+            "scope_id": device_id,
+            "condition_type": "expression",
+            "condition_json": json.dumps({"expression": "True"}, ensure_ascii=False),
+            "action_type": action_type,
+            "action_json": action_text,
+            "policy_json": json.dumps(default_watcher_policy(), ensure_ascii=False),
+        }
+        runtime = {
+            "step": {"id": 0, "name": "Watcher Action Test", "step_type": "watcher_test", "position": 0},
+            "repeat_iteration": 1,
+            "repeat_times": 1,
+        }
+        metadata = executor._execute_watcher_action(watcher, runtime["step"], runtime, {})
+        return True, "Action executed on selected device", metadata
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -126,12 +333,16 @@ class WorkflowService:
         device_service: DeviceService,
         log_service: LogService,
         telemetry_service: TelemetryService,
+        watcher_service: WatcherService,
+        watcher_telemetry_service: WatcherTelemetryService,
     ) -> None:
         self.workflow_repository = workflow_repository
         self.device_repository = device_repository
         self.device_service = device_service
         self.log_service = log_service
         self.telemetry_service = telemetry_service
+        self.watcher_service = watcher_service
+        self.watcher_telemetry_service = watcher_telemetry_service
 
     def list_workflows(self) -> list[dict[str, Any]]:
         return self.workflow_repository.list_workflows()
@@ -356,6 +567,8 @@ class WorkflowService:
             device_record=device_record,
             log_service=self.log_service,
             telemetry_service=self.telemetry_service,
+            watchers=self.watcher_service.resolve_active_watchers(workflow_id, device_id),
+            watcher_telemetry_service=self.watcher_telemetry_service,
         )
 
         self.log_service.add(
@@ -366,6 +579,7 @@ class WorkflowService:
             f"Workflow '{workflow['name']}' started",
             {
                 "step_count": len(steps),
+                "watcher_count": len(executor.watchers),
                 "device_serial": device_record["serial"],
                 "run_id": executor.run_id,
                 "artifact_dir": str(executor.run_artifact_dir),
@@ -374,6 +588,19 @@ class WorkflowService:
 
         try:
             summary = executor.run(steps)
+            if summary.get("stopped_by_watcher"):
+                self.log_service.add(
+                    workflow_id,
+                    device_id,
+                    "WARNING",
+                    "workflow_stopped",
+                    f"Workflow '{workflow['name']}' stopped by watcher",
+                    summary,
+                )
+                return {
+                    "success": True,
+                    "message": str(summary.get("stop_reason") or "Workflow stopped by watcher"),
+                }
             self.log_service.add(
                 workflow_id,
                 device_id,

@@ -11,6 +11,7 @@ from automation_studio.automation.plugins import discover_plugin_metadata
 VARIABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 WORKFLOW_DEFINITION_VERSION = 2
 STEP_SCHEMA_VERSION = 2
+WATCHER_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,18 @@ class StepDefinition:
 
     def template_json(self) -> str:
         return json.dumps(self.template, indent=2, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class WatcherPreset:
+    label: str
+    description: str
+    name: str
+    condition_type: str
+    condition: dict[str, Any]
+    action_type: str
+    action: dict[str, Any]
+    policy: dict[str, Any]
 
 
 EXECUTION_POLICY_FIELDS = (
@@ -137,6 +150,208 @@ def default_execution_policy() -> dict[str, Any]:
 
 def default_flow_control() -> dict[str, Any]:
     return {field.key: field.default for field in FLOW_CONTROL_FIELDS}
+
+
+WATCHER_SCOPE_OPTIONS = (
+    ("global", "Global"),
+    ("workflow", "Workflow"),
+    ("device", "Device"),
+)
+
+WATCHER_CONDITION_TEMPLATES: dict[str, dict[str, Any]] = {
+    "selector_exists": {"text": "Allow", "timeout": 0.0},
+    "selector_gone": {"resource_id": "com.example:id/loading", "timeout": 0.0},
+    "text_exists": {"text": "Allow", "timeout": 0.0},
+    "text_contains": {"resource_id": "com.example:id/message", "expected_text": "Success", "timeout": 0.0},
+    "app_in_foreground": {"package": "com.example.app"},
+    "package_changed": {},
+    "elapsed_time": {"seconds": 30},
+    "variable_changed": {"variable_name": "otp"},
+    "expression": {"expression": "vars.get('need_popup_guard') == True"},
+}
+
+WATCHER_ACTION_TEMPLATES: dict[str, dict[str, Any]] = {
+    "run_step": {
+        "step_type": "click",
+        "parameters": {"text": "Allow", "timeout": 1.0},
+    },
+    "action_chain": {
+        "actions": [
+            {"action_type": "take_screenshot", "action": {"filename_prefix": "popup_before_close"}},
+            {"action_type": "press_back", "action": {}},
+        ]
+    },
+    "press_back": {},
+    "take_screenshot": {"filename_prefix": "watcher_event"},
+    "dump_hierarchy": {"filename_prefix": "watcher_view"},
+    "stop_workflow": {"reason": "Watcher requested workflow stop"},
+    "set_variable": {"variable_name": "watcher_triggered", "value": "1"},
+}
+
+WATCHER_CONDITION_FIELDS: dict[str, tuple[StepField, ...]] = {
+    "selector_exists": (
+        StepField("text", "Text", placeholder="Allow"),
+        StepField("resource_id", "Resource ID", placeholder="com.example:id/allow"),
+        StepField("xpath", "XPath", placeholder='//*[@text="Allow"]'),
+        StepField("description", "Description", placeholder="Allow"),
+        StepField("class_name", "Class Name", placeholder="android.widget.Button"),
+        StepField("timeout", "Timeout", field_type="float", default=0.0, min_value=0, decimals=1),
+    ),
+    "selector_gone": (
+        StepField("text", "Text", placeholder="Loading"),
+        StepField("resource_id", "Resource ID", placeholder="com.example:id/loading"),
+        StepField("xpath", "XPath", placeholder='//*[@text="Loading"]'),
+        StepField("description", "Description", placeholder="Loading"),
+        StepField("class_name", "Class Name", placeholder="android.widget.ProgressBar"),
+        StepField("timeout", "Timeout", field_type="float", default=0.0, min_value=0, decimals=1),
+    ),
+    "text_exists": (
+        StepField("text", "Text", required=True, placeholder="Allow"),
+        StepField("timeout", "Timeout", field_type="float", default=0.0, min_value=0, decimals=1),
+    ),
+    "text_contains": (
+        StepField("text", "Selector Text", placeholder="Status"),
+        StepField("resource_id", "Resource ID", placeholder="com.example:id/status"),
+        StepField("xpath", "XPath", placeholder='//*[@resource-id="com.example:id/status"]'),
+        StepField("description", "Description", placeholder="Status"),
+        StepField("class_name", "Class Name", placeholder="android.widget.TextView"),
+        StepField("expected_text", "Expected Text", required=True, placeholder="Success"),
+        StepField("timeout", "Timeout", field_type="float", default=0.0, min_value=0, decimals=1),
+    ),
+    "app_in_foreground": (
+        StepField("package", "Package Name", required=True, placeholder="com.example.app"),
+    ),
+    "package_changed": (),
+    "elapsed_time": (
+        StepField("seconds", "Elapsed Seconds", field_type="float", default=30.0, min_value=0, decimals=1),
+    ),
+    "variable_changed": (
+        StepField("variable_name", "Variable Name", required=True, placeholder="otp"),
+    ),
+    "expression": (
+        StepField(
+            "expression",
+            "Expression",
+            field_type="textarea",
+            default="vars.get('need_popup_guard') == True",
+            required=True,
+            placeholder="vars.get('need_popup_guard') == True",
+        ),
+    ),
+}
+
+WATCHER_ACTION_FIELDS: dict[str, tuple[StepField, ...]] = {
+    "run_step": (),
+    "action_chain": (
+        StepField(
+            "actions",
+            "Actions JSON",
+            field_type="textarea",
+            default='[\n  {"action_type": "take_screenshot", "action": {"filename_prefix": "popup_before_close"}},\n  {"action_type": "press_back", "action": {}}\n]',
+            required=True,
+            placeholder='[{"action_type": "press_back", "action": {}}]',
+        ),
+    ),
+    "press_back": (),
+    "take_screenshot": (
+        StepField("filename_prefix", "Filename Prefix", default="watcher_event", required=True, placeholder="watcher_event"),
+    ),
+    "dump_hierarchy": (
+        StepField("filename_prefix", "Filename Prefix", default="watcher_view", required=True, placeholder="watcher_view"),
+    ),
+    "stop_workflow": (
+        StepField("reason", "Reason", default="Watcher requested workflow stop", required=True, placeholder="Popup loop detected"),
+    ),
+    "set_variable": (
+        StepField("variable_name", "Variable Name", required=True, placeholder="watcher_triggered"),
+        StepField("value", "Value", default="1", placeholder="1"),
+    ),
+}
+
+WATCHER_STAGE_OPTIONS = (
+    ("before_step", "Before Step"),
+    ("after_step", "After Step"),
+    ("during_wait", "During Wait"),
+)
+
+
+def default_watcher_policy() -> dict[str, Any]:
+    return {
+        "cooldown_seconds": 3.0,
+        "debounce_count": 1,
+        "max_triggers_per_run": 0,
+        "stop_after_match": False,
+        "match_mode": "first_match",
+        "active_stages": ["before_step", "after_step", "during_wait"],
+    }
+
+
+def watcher_condition_template(condition_type: str) -> dict[str, Any]:
+    return dict(WATCHER_CONDITION_TEMPLATES.get(condition_type, {}))
+
+
+def watcher_action_template(action_type: str) -> dict[str, Any]:
+    return dict(WATCHER_ACTION_TEMPLATES.get(action_type, {}))
+
+
+def watcher_presets() -> tuple[WatcherPreset, ...]:
+    return (
+        WatcherPreset(
+            label="Auto Allow Popup",
+            description="When an Allow button appears, click it once and continue the workflow.",
+            name="Auto Allow Popup",
+            condition_type="selector_exists",
+            condition={"text": "Allow", "timeout": 0.0},
+            action_type="run_step",
+            action={"step_type": "click", "parameters": {"text": "Allow", "timeout": 1.0}},
+            policy={"cooldown_seconds": 2.0, "max_triggers_per_run": 3, "stop_after_match": False, "active_stages": ["before_step", "after_step", "during_wait"]},
+        ),
+        WatcherPreset(
+            label="Auto Back Tip Panel",
+            description="If a tip panel appears, press Back to dismiss it.",
+            name="Auto Back Tip Panel",
+            condition_type="selector_exists",
+            condition={"resource_id": "product_tip_panel", "timeout": 0.0},
+            action_type="press_back",
+            action={},
+            policy={"cooldown_seconds": 2.0, "max_triggers_per_run": 5, "stop_after_match": False, "active_stages": ["before_step", "after_step", "during_wait"]},
+        ),
+        WatcherPreset(
+            label="Screenshot On Popup",
+            description="Capture evidence whenever a popup selector appears.",
+            name="Screenshot On Popup",
+            condition_type="selector_exists",
+            condition={"text": "Allow", "timeout": 0.0},
+            action_type="take_screenshot",
+            action={"filename_prefix": "popup_detected"},
+            policy={"cooldown_seconds": 5.0, "debounce_count": 1, "max_triggers_per_run": 10, "stop_after_match": False, "match_mode": "first_match", "active_stages": ["before_step", "after_step", "during_wait"]},
+        ),
+        WatcherPreset(
+            label="Screenshot Then Back",
+            description="Capture the current popup first, then dismiss it with Back.",
+            name="Screenshot Then Back",
+            condition_type="selector_exists",
+            condition={"text": "Allow", "timeout": 0.0},
+            action_type="action_chain",
+            action={
+                "actions": [
+                    {"action_type": "take_screenshot", "action": {"filename_prefix": "popup_before_back"}},
+                    {"action_type": "press_back", "action": {}},
+                ]
+            },
+            policy={"cooldown_seconds": 3.0, "debounce_count": 1, "max_triggers_per_run": 5, "stop_after_match": False, "match_mode": "continue", "active_stages": ["before_step", "after_step", "during_wait"]},
+        ),
+        WatcherPreset(
+            label="Stop After 10 Minutes",
+            description="Stop the current workflow after ten minutes of runtime.",
+            name="Stop After 10 Minutes",
+            condition_type="elapsed_time",
+            condition={"seconds": 600},
+            action_type="stop_workflow",
+            action={"reason": "Workflow exceeded 10 minutes"},
+            policy={"cooldown_seconds": 0.0, "debounce_count": 1, "max_triggers_per_run": 1, "stop_after_match": True, "match_mode": "first_match", "active_stages": ["before_step", "after_step", "during_wait"]},
+        ),
+    )
 
 
 def _selector_fields(timeout_default: int = 10) -> tuple[StepField, ...]:
@@ -829,5 +1044,150 @@ def validate_workflow_structure(steps: list[dict[str, Any]]) -> list[str]:
                     errors.append(
                         f"Step {step['position']} '{step['name']}': {label} {target_position} does not exist"
                     )
+
+    return errors
+
+
+def validate_watcher_config(
+    name: str,
+    scope_type: str,
+    scope_id: int | None,
+    condition_type: str,
+    condition: dict[str, Any],
+    action_type: str,
+    action: dict[str, Any],
+    policy: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+
+    if not str(name or "").strip():
+        errors.append("Watcher name is required")
+
+    if scope_type not in {option[0] for option in WATCHER_SCOPE_OPTIONS}:
+        errors.append("Scope Type must be global, workflow, or device")
+    elif scope_type == "global":
+        if scope_id not in (None, 0):
+            errors.append("Global watcher must not have a scope target")
+    elif not scope_id or int(scope_id) < 1:
+        errors.append("Workflow/Device watcher must have a valid target id")
+
+    if condition_type not in WATCHER_CONDITION_TEMPLATES:
+        errors.append(f"Unsupported watcher condition: {condition_type}")
+    if action_type not in WATCHER_ACTION_TEMPLATES:
+        errors.append(f"Unsupported watcher action: {action_type}")
+
+    if condition_type in {"selector_exists", "selector_gone", "text_exists", "text_contains"}:
+        if not _selector_present(condition):
+            errors.append("Selector Exists condition requires text, resource_id, xpath, description, or class_name")
+        timeout = _safe_float(condition.get("timeout", 0) or 0, "Condition Timeout", errors)
+        if timeout is not None and timeout < 0:
+            errors.append("Condition Timeout must be greater than or equal to 0")
+
+    if condition_type == "text_contains" and not str(condition.get("expected_text", "")).strip():
+        errors.append("Text Contains condition requires expected_text")
+
+    if condition_type == "app_in_foreground" and not str(condition.get("package", "")).strip():
+        errors.append("App In Foreground condition requires a package")
+
+    if condition_type == "package_changed" and condition:
+        if "package" in condition and not str(condition.get("package", "")).strip():
+            errors.append("Package Changed condition package must not be empty")
+
+    if condition_type == "elapsed_time":
+        seconds = _safe_float(condition.get("seconds", 0), "Elapsed Time Seconds", errors)
+        if seconds is not None and seconds < 0:
+            errors.append("Elapsed Time Seconds must be greater than or equal to 0")
+
+    if condition_type == "variable_changed":
+        variable_name = str(condition.get("variable_name", "")).strip()
+        if not _valid_variable_name(variable_name):
+            errors.append("Variable Changed condition requires a valid variable_name")
+
+    if condition_type == "expression" and not str(condition.get("expression", "")).strip():
+        errors.append("Expression condition requires an expression")
+
+    if action_type == "run_step":
+        step_type = str(action.get("step_type", "")).strip()
+        parameters = action.get("parameters", {})
+        if not step_type:
+            errors.append("Run Step action requires step_type")
+        elif not isinstance(parameters, dict):
+            errors.append("Run Step action parameters must be an object")
+        elif step_type in STEP_DEFINITION_MAP:
+            errors.extend(validate_step_parameters(step_type, parameters))
+        else:
+            errors.append(f"Unsupported action step type: {step_type}")
+
+    if action_type == "action_chain":
+        actions = action.get("actions", [])
+        if isinstance(actions, str):
+            try:
+                actions = json.loads(actions)
+            except json.JSONDecodeError:
+                errors.append("Action Chain actions must be valid JSON")
+                actions = []
+        if not isinstance(actions, list) or not actions:
+            errors.append("Action Chain requires a non-empty actions list")
+        else:
+            for index, item in enumerate(actions, start=1):
+                if not isinstance(item, dict):
+                    errors.append(f"Action Chain entry #{index} must be an object")
+                    continue
+                nested_type = str(item.get("action_type", "")).strip()
+                nested_action = item.get("action", {})
+                if nested_type not in WATCHER_ACTION_TEMPLATES or nested_type == "action_chain":
+                    errors.append(f"Action Chain entry #{index} has unsupported action_type: {nested_type}")
+                    continue
+                if not isinstance(nested_action, dict):
+                    errors.append(f"Action Chain entry #{index} action must be an object")
+                    continue
+                nested_errors = validate_watcher_config(
+                    name=name,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    condition_type="expression",
+                    condition={"expression": "True"},
+                    action_type=nested_type,
+                    action=nested_action,
+                    policy={"cooldown_seconds": 0, "debounce_count": 1, "max_triggers_per_run": 0, "stop_after_match": False, "match_mode": "first_match", "active_stages": ["before_step"]},
+                )
+                errors.extend(error for error in nested_errors if not error.startswith("Expression condition"))
+
+    if action_type == "set_variable":
+        variable_name = str(action.get("variable_name", "")).strip()
+        if not _valid_variable_name(variable_name):
+            errors.append("Set Variable action requires a valid variable_name")
+
+    if action_type == "take_screenshot":
+        prefix = str(action.get("filename_prefix", "") or "").strip()
+        if not prefix:
+            errors.append("Take Screenshot action requires filename_prefix")
+
+    if action_type == "dump_hierarchy":
+        prefix = str(action.get("filename_prefix", "") or "").strip()
+        if not prefix:
+            errors.append("Dump Hierarchy action requires filename_prefix")
+
+    cooldown_seconds = _safe_float(policy.get("cooldown_seconds", 0) or 0, "Cooldown Seconds", errors)
+    debounce_count = _safe_int(policy.get("debounce_count", 1) or 1, "Debounce Count", errors)
+    max_triggers_per_run = _safe_int(policy.get("max_triggers_per_run", 0) or 0, "Max Triggers Per Run", errors)
+    match_mode = str(policy.get("match_mode", "first_match") or "first_match").strip()
+    active_stages = policy.get("active_stages", [])
+
+    if cooldown_seconds is not None and cooldown_seconds < 0:
+        errors.append("Cooldown Seconds must be greater than or equal to 0")
+    if debounce_count is not None and debounce_count < 1:
+        errors.append("Debounce Count must be greater than or equal to 1")
+    if max_triggers_per_run is not None and max_triggers_per_run < 0:
+        errors.append("Max Triggers Per Run must be greater than or equal to 0")
+    if match_mode not in {"first_match", "continue"}:
+        errors.append("Match Mode must be first_match or continue")
+    if not isinstance(active_stages, list) or not active_stages:
+        errors.append("Active Stages must be a non-empty list")
+    else:
+        valid_stages = {"before_step", "after_step", "during_wait"}
+        for stage in active_stages:
+            if str(stage) not in valid_stages:
+                errors.append(f"Unsupported active stage: {stage}")
 
     return errors
