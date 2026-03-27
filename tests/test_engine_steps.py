@@ -252,6 +252,27 @@ class EngineStepSuiteTests(unittest.TestCase):
         swipe_actions = [action for action in self.device.actions if action[0] == "swipe"]
         self.assertEqual(len(swipe_actions), 2)
 
+    def test_scroll_to_selector_step(self) -> None:
+        self.device.register_selector(
+            FakeSelector(exists_states=[False, False, True]),
+            text="Buy Now",
+        )
+        result = self._execute(
+            "scroll_to_selector",
+            {
+                "text": "Buy Now",
+                "direction": "up",
+                "max_swipes": 3,
+                "timeout": 0,
+                "duration": 0.1,
+                "pause_seconds": 0,
+            },
+        )
+        self.assertTrue(result["found"])
+        self.assertEqual(result["swipes_used"], 2)
+        swipe_actions = [action for action in self.device.actions if action[0] == "swipe"]
+        self.assertEqual(len(swipe_actions), 2)
+
     def test_press_key_step(self) -> None:
         result = self._execute("press_key", {"key": "back"})
         self.assertEqual(result["key"], "back")

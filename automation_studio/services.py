@@ -495,6 +495,13 @@ class WorkflowService:
 
     def validate_workflow_steps(self, workflow_id: int) -> list[str]:
         steps = self.workflow_repository.list_steps(workflow_id)
+        return self._validate_steps(steps, include_structure=True)
+
+    def _validate_steps(
+        self,
+        steps: list[dict[str, Any]],
+        include_structure: bool = True,
+    ) -> list[str]:
         errors: list[str] = []
         for step in steps:
             if not step["is_enabled"]:
@@ -512,8 +519,20 @@ class WorkflowService:
             step_errors = validate_step_parameters(step["step_type"], parameters)
             for error in step_errors:
                 errors.append(f"Step {step['position']} '{step['name']}': {error}")
-        errors.extend(validate_workflow_structure(steps))
+        if include_structure:
+            errors.extend(validate_workflow_structure(steps))
         return errors
+
+    def _resolve_execution_steps(
+        self,
+        workflow_id: int,
+        step_ids: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        steps = self.workflow_repository.list_steps(workflow_id)
+        if not step_ids:
+            return steps
+        requested_ids = {int(step_id) for step_id in step_ids}
+        return [step for step in steps if int(step["id"]) in requested_ids]
 
     def export_workflow_definition(self, workflow_id: int) -> dict[str, Any]:
         workflow = self.workflow_repository.get_workflow(workflow_id)
@@ -605,6 +624,17 @@ class WorkflowService:
         return workflow_id
 
     def execute_workflow(self, workflow_id: int, device_id: int) -> dict[str, Any]:
+        return self._execute_workflow_run(workflow_id, device_id, step_ids=None)
+
+    def execute_step(self, workflow_id: int, step_id: int, device_id: int) -> dict[str, Any]:
+        return self._execute_workflow_run(workflow_id, device_id, step_ids=[step_id])
+
+    def _execute_workflow_run(
+        self,
+        workflow_id: int,
+        device_id: int,
+        step_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
         workflow = self.workflow_repository.get_workflow(workflow_id)
         device_record = self.device_repository.get_device(device_id)
         if not workflow:
@@ -612,13 +642,14 @@ class WorkflowService:
         if not device_record:
             return {"success": False, "message": "Device not found"}
 
-        steps = self.workflow_repository.list_steps(workflow_id)
+        steps = self._resolve_execution_steps(workflow_id, step_ids)
         if not steps:
-            return {"success": False, "message": "Workflow has no steps"}
+            return {"success": False, "message": "Selected step was not found in this workflow" if step_ids else "Workflow has no steps"}
 
-        validation_errors = self.validate_workflow_steps(workflow_id)
+        validation_errors = self._validate_steps(steps, include_structure=not step_ids)
         if validation_errors:
-            message = "Pre-run validation failed:\n" + "\n".join(validation_errors)
+            scope_label = "Selected step validation failed" if step_ids else "Pre-run validation failed"
+            message = scope_label + ":\n" + "\n".join(validation_errors)
             self.log_service.add(
                 workflow_id,
                 device_id,
@@ -652,18 +683,29 @@ class WorkflowService:
             watcher_telemetry_service=self.watcher_telemetry_service,
         )
 
+        execution_scope = "selected_step" if step_ids else "workflow"
+        execution_name = (
+            f"step '{steps[0]['name']}'"
+            if step_ids and len(steps) == 1
+            else f"{len(steps)} selected steps"
+            if step_ids
+            else f"workflow '{workflow['name']}'"
+        )
+
         self.log_service.add(
             workflow_id,
             device_id,
             "INFO",
             "workflow_started",
-            f"Workflow '{workflow['name']}' started",
+            f"Started {execution_name}",
             {
                 "step_count": len(steps),
                 "watcher_count": len(executor.watchers),
                 "device_serial": device_record["serial"],
                 "run_id": executor.run_id,
                 "artifact_dir": str(executor.run_artifact_dir),
+                "execution_scope": execution_scope,
+                "selected_step_ids": [int(step["id"]) for step in steps] if step_ids else [],
             },
         )
 
@@ -675,7 +717,7 @@ class WorkflowService:
                     device_id,
                     "WARNING",
                     "workflow_stopped",
-                    f"Workflow '{workflow['name']}' stopped by watcher",
+                    f"{execution_name.capitalize()} stopped by watcher",
                     summary,
                 )
                 return {
@@ -687,12 +729,18 @@ class WorkflowService:
                 device_id,
                 "INFO",
                 "workflow_success",
-                f"Workflow '{workflow['name']}' completed successfully",
+                f"Completed {execution_name}",
                 summary,
             )
             continued = int(summary.get("continued_failures", 0))
             skipped = int(summary.get("skipped_failures", 0))
-            message = f"Workflow completed ({summary['executed_steps']} steps)"
+            message = (
+                f"Selected step completed ({summary['executed_steps']} step)"
+                if step_ids and len(steps) == 1
+                else f"Selected steps completed ({summary['executed_steps']} steps)"
+                if step_ids
+                else f"Workflow completed ({summary['executed_steps']} steps)"
+            )
             if continued or skipped:
                 message += f" with {continued} continued failure(s) and {skipped} skipped failure(s)"
             return {
@@ -705,10 +753,11 @@ class WorkflowService:
                 device_id,
                 "ERROR",
                 "workflow_failed",
-                f"Workflow '{workflow['name']}' failed: {exc}",
+                f"{execution_name.capitalize()} failed: {exc}",
                 {
                     "run_id": executor.run_id,
                     "artifact_dir": str(executor.run_artifact_dir),
+                    "execution_scope": execution_scope,
                 },
             )
             return {"success": False, "message": str(exc)}

@@ -392,6 +392,34 @@ def _direction_fields(default_repeat: int = 1) -> tuple[StepField, ...]:
     )
 
 
+def _scroll_to_selector_fields() -> tuple[StepField, ...]:
+    return (
+        *_selector_fields(timeout_default=0),
+        StepField(
+            "direction",
+            "Direction",
+            field_type="combo",
+            default="up",
+            options=(("up", "Up"), ("down", "Down"), ("left", "Left"), ("right", "Right"), ("", "Custom")),
+        ),
+        StepField("max_swipes", "Max Swipes", field_type="int", default=8, min_value=1),
+        StepField("scale", "Scale", field_type="float", default=0.75, min_value=0.05, max_value=1.0, decimals=2),
+        StepField("anchor_x", "Anchor X", field_type="float", default=0.5, min_value=0, max_value=1, decimals=2),
+        StepField("anchor_y", "Anchor Y", field_type="float", default=0.55, min_value=0, max_value=1, decimals=2),
+        StepField("margin_ratio", "Margin Ratio", field_type="float", default=0.1, min_value=0, max_value=0.45, decimals=2),
+        StepField("x1_ratio", "Start X Ratio", field_type="float", default=0.5, min_value=0, max_value=1, decimals=2),
+        StepField("y1_ratio", "Start Y Ratio", field_type="float", default=0.8, min_value=0, max_value=1, decimals=2),
+        StepField("x2_ratio", "End X Ratio", field_type="float", default=0.5, min_value=0, max_value=1, decimals=2),
+        StepField("y2_ratio", "End Y Ratio", field_type="float", default=0.2, min_value=0, max_value=1, decimals=2),
+        StepField("x1", "Start X", field_type="int", default=540, min_value=0),
+        StepField("y1", "Start Y", field_type="int", default=1600, min_value=0),
+        StepField("x2", "End X", field_type="int", default=540, min_value=0),
+        StepField("y2", "End Y", field_type="int", default=400, min_value=0),
+        StepField("duration", "Duration", field_type="float", default=0.18, min_value=0, decimals=2),
+        StepField("pause_seconds", "Pause Seconds", field_type="float", default=0.25, min_value=0, decimals=2),
+    )
+
+
 STEP_DEFINITIONS = [
     StepDefinition(
         key="launch_app",
@@ -534,6 +562,55 @@ STEP_DEFINITIONS = [
         presets=(
             StepPreset("Scroll Down Feed", "Scroll a feed upward to reveal more content.", {"direction": "up", "scale": 0.75, "anchor_x": 0.5, "anchor_y": 0.55, "duration": 0.18, "repeat": 3, "pause_seconds": 0.25}),
             StepPreset("Scroll Up", "Reverse scroll direction.", {"direction": "down", "scale": 0.75, "anchor_x": 0.5, "anchor_y": 0.45, "duration": 0.18, "repeat": 3, "pause_seconds": 0.25}),
+        ),
+    ),
+    StepDefinition(
+        key="scroll_to_selector",
+        label="Scroll To Selector",
+        description="Swipe until the target selector appears or max swipes is reached.",
+        template={
+            "resource_id": "com.example:id/target",
+            "timeout": 0.5,
+            "direction": "up",
+            "max_swipes": 8,
+            "scale": 0.75,
+            "anchor_x": 0.5,
+            "anchor_y": 0.55,
+            "duration": 0.18,
+            "pause_seconds": 0.25,
+        },
+        fields=_scroll_to_selector_fields(),
+        presets=(
+            StepPreset(
+                "Find By Resource ID",
+                "Scroll a feed until a resource id appears.",
+                {
+                    "resource_id": "com.example:id/target",
+                    "timeout": 0.5,
+                    "direction": "up",
+                    "max_swipes": 8,
+                    "scale": 0.75,
+                    "anchor_x": 0.5,
+                    "anchor_y": 0.55,
+                    "duration": 0.18,
+                    "pause_seconds": 0.25,
+                },
+            ),
+            StepPreset(
+                "Find By Text",
+                "Scroll until matching text becomes visible.",
+                {
+                    "text": "Buy Now",
+                    "timeout": 0.5,
+                    "direction": "up",
+                    "max_swipes": 6,
+                    "scale": 0.7,
+                    "anchor_x": 0.5,
+                    "anchor_y": 0.55,
+                    "duration": 0.18,
+                    "pause_seconds": 0.2,
+                },
+            ),
         ),
     ),
     StepDefinition(
@@ -880,7 +957,7 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         if min_seconds is not None and max_seconds is not None and min_seconds > max_seconds:
             errors.append("Min Seconds must be less than or equal to Max Seconds")
 
-    if step_type in {"wait_for_text", "assert_exists", "wait_for_element", "assert_text", "extract_text"}:
+    if step_type in {"wait_for_text", "assert_exists", "wait_for_element", "assert_text", "extract_text", "scroll_to_selector"}:
         require_selector(definition.label)
 
     if step_type == "wait_for_element":
@@ -900,6 +977,28 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
             ratio_ready = all(key in parameters for key in ("x1_ratio", "y1_ratio", "x2_ratio", "y2_ratio"))
             if not absolute_ready and not ratio_ready:
                 errors.append(f"{definition.label} custom mode requires x1/y1/x2/y2 or x1_ratio/y1_ratio/x2_ratio/y2_ratio")
+
+    if step_type == "scroll_to_selector":
+        direction = str(parameters.get("direction", "")).strip().lower()
+        if direction and direction not in {"up", "down", "left", "right"}:
+            errors.append("Direction must be one of up, down, left, right or empty for custom")
+        if not direction:
+            absolute_ready = all(key in parameters for key in ("x1", "y1", "x2", "y2"))
+            ratio_ready = all(key in parameters for key in ("x1_ratio", "y1_ratio", "x2_ratio", "y2_ratio"))
+            if not absolute_ready and not ratio_ready:
+                errors.append(f"{definition.label} custom mode requires x1/y1/x2/y2 or x1_ratio/y1_ratio/x2_ratio/y2_ratio")
+        timeout = _safe_float(parameters.get("timeout", 0) or 0, "Timeout", errors)
+        max_swipes = _safe_int(parameters.get("max_swipes", 0) or 0, "Max Swipes", errors)
+        duration = _safe_float(parameters.get("duration", 0) or 0, "Duration", errors)
+        pause_seconds = _safe_float(parameters.get("pause_seconds", 0) or 0, "Pause Seconds", errors)
+        if timeout is not None and timeout < 0:
+            errors.append("Timeout must be greater than or equal to 0")
+        if max_swipes is not None and max_swipes < 1:
+            errors.append("Max Swipes must be greater than or equal to 1")
+        if duration is not None and duration < 0:
+            errors.append("Duration must be greater than or equal to 0")
+        if pause_seconds is not None and pause_seconds < 0:
+            errors.append("Pause Seconds must be greater than or equal to 0")
 
     if step_type == "press_key" and not str(parameters.get("key", "")).strip():
         errors.append("Key is required")

@@ -13,14 +13,18 @@ from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 class WorkflowRunner(QtCore.QThread):
     result_ready = QtCore.Signal(dict)
 
-    def __init__(self, workflow_service, workflow_id: int, device_id: int) -> None:
+    def __init__(self, workflow_service, workflow_id: int, device_id: int, step_ids: list[int] | None = None) -> None:
         super().__init__()
         self.workflow_service = workflow_service
         self.workflow_id = workflow_id
         self.device_id = device_id
+        self.step_ids = list(step_ids or [])
 
     def run(self) -> None:
-        result = self.workflow_service.execute_workflow(self.workflow_id, self.device_id)
+        if len(self.step_ids) == 1:
+            result = self.workflow_service.execute_step(self.workflow_id, self.step_ids[0], self.device_id)
+        else:
+            result = self.workflow_service.execute_workflow(self.workflow_id, self.device_id)
         self.result_ready.emit(result)
 
 
@@ -269,8 +273,10 @@ class WorkflowPage(QtWidgets.QWidget):
 
         top_actions = QtWidgets.QHBoxLayout()
         self.device_combo = QtWidgets.QComboBox()
+        self.run_step_button = make_button("Run Selected Step", "secondary")
         self.run_button = make_button("Run Workflow")
         top_actions.addWidget(self.device_combo, 1)
+        top_actions.addWidget(self.run_step_button)
         top_actions.addWidget(self.run_button)
         steps_layout.addLayout(top_actions)
 
@@ -339,6 +345,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.steps_table.itemSelectionChanged.connect(self._on_step_selected)
         self.steps_table.itemDoubleClicked.connect(lambda *_: self.open_edit_step_dialog())
         self.steps_table.order_changed.connect(self._persist_step_order)
+        self.run_step_button.clicked.connect(self.run_selected_step)
         self.run_button.clicked.connect(self.run_workflow)
 
         self._sync_step_actions()
@@ -569,6 +576,8 @@ class WorkflowPage(QtWidgets.QWidget):
         self.add_step_button.setEnabled(has_workflow)
         self.workflow_export_button.setEnabled(has_workflow)
         self.workflow_import_button.setEnabled(True)
+        self.run_button.setEnabled(has_workflow and self.runner is None)
+        self.run_step_button.setEnabled(has_step and self.runner is None)
         self.duplicate_step_button.setEnabled(has_step)
         self.toggle_step_button.setEnabled(has_step)
         self.move_up_button.setEnabled(has_step and current_row > 0)
@@ -726,12 +735,34 @@ class WorkflowPage(QtWidgets.QWidget):
         if device_id is None:
             QtWidgets.QMessageBox.warning(self, "Missing device", "กรุณาเพิ่มอุปกรณ์ก่อนรัน workflow")
             return
+        self._start_runner(device_id, None, "Running workflow on selected device...")
+
+    def run_selected_step(self) -> None:
+        if not self.current_workflow_id:
+            QtWidgets.QMessageBox.warning(self, "Missing workflow", "Please select a workflow first.")
+            return
+        step = self._selected_step()
+        if not step:
+            QtWidgets.QMessageBox.warning(self, "Missing step", "Please select a step to run.")
+            return
+        device_id = self.device_combo.currentData()
+        if device_id is None:
+            QtWidgets.QMessageBox.warning(self, "Missing device", "Please add a device before running a step.")
+            return
+        self._start_runner(device_id, [int(step["id"])], f"Running selected step: {step['name']}...")
+
+    def _start_runner(self, device_id: int, step_ids: list[int] | None, status_text: str) -> None:
         self.run_button.setDisabled(True)
-        self.run_status_label.setText("กำลังรัน workflow บนอุปกรณ์ที่เลือก...")
-        self.runner = WorkflowRunner(self.workflow_service, self.current_workflow_id, device_id)
+        self.run_step_button.setDisabled(True)
+        self.run_status_label.setText(status_text)
+        self.runner = WorkflowRunner(self.workflow_service, self.current_workflow_id, device_id, step_ids)
         self.runner.result_ready.connect(self._on_workflow_finished)
-        self.runner.finished.connect(lambda: self.run_button.setDisabled(False))
+        self.runner.finished.connect(self._on_runner_finished)
         self.runner.start()
+
+    def _on_runner_finished(self) -> None:
+        self.runner = None
+        self._sync_step_actions()
 
     def _on_workflow_finished(self, result: dict) -> None:
         self.run_status_label.setText(result["message"])

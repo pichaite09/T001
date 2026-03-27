@@ -195,6 +195,7 @@ class WorkflowExecutor:
             "wait_for_element": self._wait_for_element,
             "swipe": self._swipe,
             "scroll": self._scroll,
+            "scroll_to_selector": self._scroll_to_selector,
             "press_key": self._press_key,
             "input_keycode": self._input_keycode,
             "shell": self._shell,
@@ -1136,6 +1137,41 @@ class WorkflowExecutor:
         metadata = self._run_swipe(parameters)
         metadata["mode"] = "scroll"
         return metadata
+
+    def _scroll_to_selector(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        target_type, target, selector_timeout = self._selector(parameters)
+        if not target:
+            raise RuntimeError("scroll_to_selector requires text, resource_id, xpath or description")
+
+        max_swipes = max(1, int(parameters.get("max_swipes", 1) or 1))
+        timeout = max(float(parameters.get("timeout", selector_timeout) or selector_timeout or 0), 0.0)
+        swipe_parameters = dict(parameters)
+        swipe_parameters["repeat"] = 1
+
+        for swipe_index in range(max_swipes + 1):
+            if timeout > 0:
+                found = self._wait_on_target(target_type, target, timeout)
+            else:
+                found = self._target_exists_now(target_type, target)
+            if found:
+                return {
+                    "selector_type": target_type,
+                    "found": True,
+                    "swipes_used": swipe_index,
+                    "max_swipes": max_swipes,
+                }
+
+            if swipe_index >= max_swipes:
+                break
+
+            self._run_swipe(swipe_parameters)
+            pause_seconds = float(parameters.get("pause_seconds", 0) or 0)
+            if pause_seconds > 0:
+                self._sleep_with_watchers(pause_seconds, runtime["step"], runtime)
+                if self._stop_requested:
+                    break
+
+        raise RuntimeError(f"Target not found after {max_swipes} swipe(s)")
 
     def _run_swipe(self, parameters: dict[str, Any]) -> dict[str, Any]:
         x1, y1, x2, y2 = self._resolve_swipe_points(parameters)
