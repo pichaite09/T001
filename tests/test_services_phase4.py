@@ -289,6 +289,97 @@ class ServicePhase4Tests(unittest.TestCase):
         self.assertEqual(metadata["platform_key"], "shopee")
         self.assertEqual(metadata["account_id"], account_id)
 
+    def test_run_for_each_account_switches_and_runs_target_workflow(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)
+        self.service.save_step(
+            None,
+            switch_workflow_id,
+            1,
+            "Capture Account",
+            "set_variable",
+            json.dumps(
+                {
+                    "variable_name": "switched_to",
+                    "value_mode": "template",
+                    "value": "${account.get('display_name')}",
+                }
+            ),
+            True,
+        )
+        target_workflow_id = self.service.save_workflow(None, "Shopee Account Task", "", True)
+        self.service.save_step(
+            None,
+            target_workflow_id,
+            1,
+            "Tap Task",
+            "tap",
+            json.dumps({"x": 101, "y": 202}),
+            True,
+        )
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            switch_workflow_id,
+            True,
+        )
+        first_account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "shop-a",
+            "shop_a",
+            "shop_a",
+            "",
+            "{}",
+            True,
+        )
+        second_account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "shop-b",
+            "shop_b",
+            "shop_b",
+            "",
+            "{}",
+            True,
+        )
+        main_workflow_id = self.service.save_workflow(None, "Main Workflow", "", True)
+        step_id = self.service.save_step(
+            None,
+            main_workflow_id,
+            1,
+            "Run All Accounts",
+            "run_for_each_account",
+            json.dumps(
+                {
+                    "platform_key": "shopee",
+                    "target_workflow_id": target_workflow_id,
+                    "only_enabled": True,
+                    "launch_package_first": True,
+                    "continue_on_account_error": False,
+                }
+            ),
+            True,
+        )
+
+        result = self.service.execute_step(main_workflow_id, step_id, device_id)
+
+        self.assertTrue(result["success"])
+        tap_actions = [action for action in self.fake_device.actions if action == ("click", 101, 202)]
+        self.assertEqual(len(tap_actions), 2)
+        app_start_actions = [action for action in self.fake_device.actions if action == ("app_start", "com.shopee.th")]
+        self.assertEqual(len(app_start_actions), 2)
+        device_platform = self.account_service.get_device_platform(device_platform_id)
+        self.assertEqual(int(device_platform["current_account_id"]), second_account_id)
+        logs = self.log_service.list_logs(workflow_id=main_workflow_id, device_id=device_id, limit=20)
+        start_log = next(log for log in logs if log["status"] == "workflow_started")
+        start_metadata = json.loads(start_log["metadata"])
+        self.assertEqual(start_metadata["execution_scope"], "selected_step")
+        self.assertEqual(start_metadata["selected_step_ids"], [step_id])
+
 
 if __name__ == "__main__":
     unittest.main()

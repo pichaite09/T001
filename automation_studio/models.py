@@ -637,6 +637,38 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="run_for_each_account",
+        label="Run For Each Account",
+        description="Switch through every account in the selected platform and run a target workflow for each one.",
+        template={
+            "platform_key": "shopee",
+            "target_workflow_id": 1,
+            "only_enabled": True,
+            "launch_package_first": True,
+            "continue_on_account_error": True,
+        },
+        fields=(
+            StepField("platform_key", "Platform Key", required=True, placeholder="shopee"),
+            StepField("target_workflow_id", "Target Workflow ID", field_type="int", default=1, required=True, min_value=1),
+            StepField("only_enabled", "Only Enabled Accounts", field_type="bool", default=True),
+            StepField("launch_package_first", "Launch Package First", field_type="bool", default=True),
+            StepField("continue_on_account_error", "Continue On Account Error", field_type="bool", default=True),
+        ),
+        presets=(
+            StepPreset(
+                "Run Enabled Accounts",
+                "Switch all enabled accounts in the platform and run a reusable target workflow.",
+                {
+                    "platform_key": "shopee",
+                    "target_workflow_id": 1,
+                    "only_enabled": True,
+                    "launch_package_first": True,
+                    "continue_on_account_error": True,
+                },
+            ),
+        ),
+    ),
+    StepDefinition(
         key="press_key",
         label="Press Key",
         description="Press common Android keys such as home, back, or enter.",
@@ -1089,6 +1121,13 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
             errors.append("Account ID must be greater than or equal to 0")
         if not account_name and not int(parameters.get("account_id", 0) or 0):
             errors.append("Switch Account requires account_name or account_id")
+
+    if step_type == "run_for_each_account":
+        if not str(parameters.get("platform_key", "")).strip():
+            errors.append("Platform Key is required")
+        target_workflow_id = _safe_int(parameters.get("target_workflow_id"), "Target Workflow ID", errors)
+        if target_workflow_id is not None and target_workflow_id < 1:
+            errors.append("Target Workflow ID must be greater than or equal to 1")
 
     if step_type == "press_key" and not str(parameters.get("key", "")).strip():
         errors.append("Key is required")

@@ -553,6 +553,23 @@ class AccountService:
             raise ValueError("Account is disabled")
         return device_platform, account
 
+    def list_accounts_for_platform(
+        self,
+        device_id: int,
+        platform_key: str,
+        *,
+        only_enabled: bool = True,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        device_platform = self.account_repository.get_device_platform_by_key(device_id, str(platform_key or "").strip().lower())
+        if not device_platform:
+            raise ValueError("Platform not found on this device")
+        if not bool(device_platform.get("is_enabled", 1)):
+            raise ValueError("Platform is disabled")
+        accounts = self.account_repository.list_accounts(int(device_platform["id"]))
+        if only_enabled:
+            accounts = [account for account in accounts if bool(account.get("is_enabled", 1))]
+        return device_platform, accounts
+
     def resolve_runtime_context(
         self,
         device_id: int,
@@ -779,8 +796,52 @@ class WorkflowService:
             watchers=self.watcher_service.resolve_active_watchers(int(workflow["id"]), int(device_record["id"])),
             watcher_telemetry_service=self.watcher_telemetry_service,
             switch_account_handler=self._execute_switch_account_step,
+            run_for_each_account_handler=self._execute_run_for_each_account_step,
             shared_context=shared_context,
         )
+
+    def _merge_runtime_context(self, executor: WorkflowExecutor, shared_context: dict[str, Any]) -> None:
+        if not shared_context:
+            return
+        vars_payload = shared_context.get("vars")
+        if isinstance(vars_payload, dict):
+            executor.context["vars"].update(vars_payload)
+        if "platform" in shared_context:
+            executor.context["platform"] = shared_context["platform"]
+        if "account" in shared_context:
+            executor.context["account"] = shared_context["account"]
+
+    def _run_nested_workflow(
+        self,
+        *,
+        executor: WorkflowExecutor,
+        workflow_id: int,
+        shared_context: dict[str, Any],
+        label: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if int(workflow_id) == int(executor.workflow["id"]):
+            raise RuntimeError(f"{label} cannot target the current workflow")
+        nested_workflow = self.workflow_repository.get_workflow(int(workflow_id))
+        if not nested_workflow:
+            raise RuntimeError(f"{label} not found")
+        nested_steps = self.workflow_repository.list_steps(int(workflow_id))
+        if not nested_steps:
+            raise RuntimeError(f"{label} has no steps")
+
+        validation_errors = self._validate_steps(nested_steps, include_structure=True)
+        if validation_errors:
+            raise RuntimeError(f"{label} validation failed: " + "; ".join(validation_errors))
+
+        nested_executor = self._executor_for_runtime(
+            device=executor.device,
+            workflow=nested_workflow,
+            device_record=executor.device_record,
+            shared_context=shared_context,
+        )
+        summary = nested_executor.run(nested_steps)
+        if summary.get("stopped_by_watcher"):
+            raise RuntimeError(str(summary.get("stop_reason") or f"{label} stopped by watcher"))
+        return nested_workflow, summary
 
     def _execute_switch_account_step(
         self,
@@ -813,61 +874,120 @@ class WorkflowService:
         if bool(parameters.get("launch_package_first")) and str(device_platform.get("package_name") or "").strip():
             executor.device.app_start(str(device_platform["package_name"]))
 
-        account_context = {
-            "id": int(account["id"]),
-            "device_platform_id": int(account["device_platform_id"]),
-            "display_name": account["display_name"],
-            "username": account.get("username") or "",
-            "login_id": account.get("login_id") or "",
-            "notes": account.get("notes") or "",
-            "metadata": json.loads(account.get("metadata_json") or "{}"),
-        }
-        platform_context = {
-            "id": int(device_platform["id"]),
-            "key": device_platform["platform_key"],
-            "name": device_platform["platform_name"],
-            "package_name": device_platform.get("package_name") or "",
-            "switch_workflow_id": switch_workflow_id,
-        }
-        executor.context["platform"] = platform_context
-        executor.context["account"] = account_context
-        executor.context["vars"]["current_platform_key"] = platform_context["key"]
-        executor.context["vars"]["current_platform_name"] = platform_context["name"]
-        executor.context["vars"]["current_account_id"] = account_context["id"]
-        executor.context["vars"]["current_account_name"] = account_context["display_name"]
-        executor.context["vars"]["current_account_username"] = account_context["username"]
-        executor.context["vars"]["current_account_login_id"] = account_context["login_id"]
-
-        switch_workflow = self.workflow_repository.get_workflow(switch_workflow_id)
-        if not switch_workflow:
-            raise RuntimeError("Switch workflow not found")
-        switch_steps = self.workflow_repository.list_steps(switch_workflow_id)
-        if not switch_steps:
-            raise RuntimeError("Switch workflow has no steps")
-
-        validation_errors = self._validate_steps(switch_steps, include_structure=True)
-        if validation_errors:
-            raise RuntimeError("Switch workflow validation failed: " + "; ".join(validation_errors))
-
-        nested_executor = self._executor_for_runtime(
-            device=executor.device,
-            workflow=switch_workflow,
-            device_record=executor.device_record,
-            shared_context=executor.context,
+        shared_context, _ = self.account_service.resolve_runtime_context(
+            int(executor.device_record["id"]),
+            int(device_platform["id"]),
+            account_id=int(account["id"]),
         )
-        summary = nested_executor.run(switch_steps)
-        if summary.get("stopped_by_watcher"):
-            raise RuntimeError(str(summary.get("stop_reason") or "Switch workflow stopped by watcher"))
+        self._merge_runtime_context(executor, shared_context)
+
+        switch_workflow, summary = self._run_nested_workflow(
+            executor=executor,
+            workflow_id=switch_workflow_id,
+            shared_context=executor.context,
+            label="Switch workflow",
+        )
 
         self.account_service.set_current_account(int(device_platform["id"]), int(account["id"]))
         return {
-            "platform_key": platform_context["key"],
-            "platform_name": platform_context["name"],
-            "account_id": account_context["id"],
-            "account_name": account_context["display_name"],
+            "platform_key": executor.context["platform"]["key"],
+            "platform_name": executor.context["platform"]["name"],
+            "account_id": executor.context["account"]["id"],
+            "account_name": executor.context["account"]["display_name"],
             "switch_workflow_id": switch_workflow_id,
             "switch_workflow_name": switch_workflow.get("name") or "",
             "switch_summary": summary,
+        }
+
+    def _execute_run_for_each_account_step(
+        self,
+        executor: WorkflowExecutor,
+        parameters: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.account_service:
+            raise RuntimeError("Account service is not available")
+
+        platform_key = str(parameters.get("platform_key", "") or "").strip().lower()
+        target_workflow_id = int(parameters.get("target_workflow_id", 0) or 0)
+        only_enabled = bool(parameters.get("only_enabled", True))
+        launch_package_first = bool(parameters.get("launch_package_first", True))
+        continue_on_account_error = bool(parameters.get("continue_on_account_error", True))
+
+        if not platform_key:
+            raise RuntimeError("run_for_each_account requires platform_key")
+        if target_workflow_id <= 0:
+            raise RuntimeError("run_for_each_account requires target_workflow_id")
+
+        device_platform, accounts = self.account_service.list_accounts_for_platform(
+            int(executor.device_record["id"]),
+            platform_key,
+            only_enabled=only_enabled,
+        )
+        if not accounts:
+            raise RuntimeError("No accounts available for this platform")
+        if int(device_platform.get("switch_workflow_id") or 0) <= 0:
+            raise RuntimeError("No switch workflow configured for this platform")
+
+        account_results: list[dict[str, Any]] = []
+        success_count = 0
+        failure_count = 0
+
+        for account_index, account in enumerate(accounts, start=1):
+            executor.context["vars"]["foreach_account_index"] = account_index
+            executor.context["vars"]["foreach_account_total"] = len(accounts)
+            executor.context["vars"]["foreach_account_name"] = str(account.get("display_name") or "")
+            executor.context["vars"]["foreach_account_id"] = int(account["id"])
+            try:
+                switch_result = self._execute_switch_account_step(
+                    executor,
+                    {
+                        "platform_key": platform_key,
+                        "account_id": int(account["id"]),
+                        "launch_package_first": launch_package_first,
+                    },
+                    runtime,
+                )
+                target_workflow, target_summary = self._run_nested_workflow(
+                    executor=executor,
+                    workflow_id=target_workflow_id,
+                    shared_context=executor.context,
+                    label="Target workflow",
+                )
+                success_count += 1
+                account_results.append(
+                    {
+                        "account_id": int(account["id"]),
+                        "account_name": str(account.get("display_name") or ""),
+                        "success": True,
+                        "switch_result": switch_result,
+                        "target_workflow_id": int(target_workflow["id"]),
+                        "target_workflow_name": str(target_workflow.get("name") or ""),
+                        "target_summary": target_summary,
+                    }
+                )
+            except Exception as exc:
+                failure_count += 1
+                account_results.append(
+                    {
+                        "account_id": int(account["id"]),
+                        "account_name": str(account.get("display_name") or ""),
+                        "success": False,
+                        "error": str(exc),
+                    }
+                )
+                if not continue_on_account_error:
+                    raise RuntimeError(f"Account '{account.get('display_name')}' failed: {exc}") from exc
+
+        return {
+            "platform_key": str(device_platform["platform_key"]),
+            "platform_name": str(device_platform["platform_name"]),
+            "target_workflow_id": target_workflow_id,
+            "processed_accounts": len(accounts),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "continue_on_account_error": continue_on_account_error,
+            "account_results": account_results,
         }
 
     def export_workflow_definition(self, workflow_id: int) -> dict[str, Any]:

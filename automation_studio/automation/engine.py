@@ -30,6 +30,7 @@ class WorkflowExecutor:
         watchers: list[dict[str, Any]] | None = None,
         watcher_telemetry_service: Any | None = None,
         switch_account_handler: Any | None = None,
+        run_for_each_account_handler: Any | None = None,
         shared_context: dict[str, Any] | None = None,
     ) -> None:
         self.device = device
@@ -40,6 +41,7 @@ class WorkflowExecutor:
         self.watchers = sorted(watchers or [], key=lambda item: (int(item.get("priority", 100)), int(item.get("id", 0))))
         self.watcher_telemetry_service = watcher_telemetry_service
         self.switch_account_handler = switch_account_handler
+        self.run_for_each_account_handler = run_for_each_account_handler
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_artifact_dir = (
             Path("artifacts")
@@ -206,6 +208,7 @@ class WorkflowExecutor:
             "scroll": self._scroll,
             "scroll_to_selector": self._scroll_to_selector,
             "switch_account": self._switch_account,
+            "run_for_each_account": self._run_for_each_account,
             "press_key": self._press_key,
             "input_keycode": self._input_keycode,
             "shell": self._shell,
@@ -1192,6 +1195,11 @@ class WorkflowExecutor:
         if not self.switch_account_handler:
             raise RuntimeError("switch_account is not configured for this runtime")
         return self.switch_account_handler(self, parameters, runtime)
+
+    def _run_for_each_account(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        if not self.run_for_each_account_handler:
+            raise RuntimeError("run_for_each_account is not configured for this runtime")
+        return self.run_for_each_account_handler(self, parameters, runtime)
 
     def _run_swipe(self, parameters: dict[str, Any]) -> dict[str, Any]:
         x1, y1, x2, y2 = self._resolve_swipe_points(parameters)

@@ -726,6 +726,10 @@ class WorkflowPage(QtWidgets.QWidget):
             self,
             step_data=step,
             default_position=max(self.steps_table.rowCount(), 0) + 1,
+            workflow_choices=[
+                (int(workflow["id"]), str(workflow["name"]))
+                for workflow in self.workflow_service.list_workflows()
+            ],
         )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return

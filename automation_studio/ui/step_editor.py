@@ -24,9 +24,11 @@ class StepEditorDialog(QtWidgets.QDialog):
         parent: QtWidgets.QWidget | None = None,
         step_data: dict | None = None,
         default_position: int = 1,
+        workflow_choices: list[tuple[int, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.step_data = step_data
+        self.workflow_choices = list(workflow_choices or [])
         self.field_widgets: dict[str, QtWidgets.QWidget] = {}
         self.field_definitions: dict[str, StepField] = {}
         self.policy_widgets: dict[str, QtWidgets.QWidget] = {}
@@ -304,6 +306,12 @@ class StepEditorDialog(QtWidgets.QDialog):
             widget.setChecked(bool(field_definition.default))
             return widget
 
+        if field_definition.key == "target_workflow_id":
+            widget = QtWidgets.QComboBox()
+            for workflow_id, workflow_name in self.workflow_choices:
+                widget.addItem(f"{workflow_name} (ID: {workflow_id})", workflow_id)
+            return widget
+
         if field_definition.field_type == "combo":
             widget = QtWidgets.QComboBox()
             for value, label in field_definition.options:
@@ -367,6 +375,9 @@ class StepEditorDialog(QtWidgets.QDialog):
                 if index >= 0:
                     widget.setCurrentIndex(index)
                 elif widget.count() > 0:
+                    widget.setCurrentIndex(0)
+                elif field_definition.key == "target_workflow_id":
+                    widget.addItem(f"Workflow ID: {value}", value)
                     widget.setCurrentIndex(0)
             elif isinstance(widget, QtWidgets.QSpinBox):
                 widget.setValue(int(value or 0))
