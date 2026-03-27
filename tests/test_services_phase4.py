@@ -229,6 +229,176 @@ class ServicePhase4Tests(unittest.TestCase):
         device_platform = self.account_service.get_device_platform(device_platform_id)
         self.assertEqual(int(device_platform["current_account_id"]), account_id)
 
+    def test_switch_account_resolves_alias_name(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)
+        self.service.save_step(
+            None,
+            switch_workflow_id,
+            1,
+            "Capture Account",
+            "set_variable",
+            json.dumps(
+                {
+                    "variable_name": "switched_to",
+                    "value_mode": "template",
+                    "value": "${account.get('display_name')}",
+                }
+            ),
+            True,
+        )
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            switch_workflow_id,
+            True,
+        )
+        account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "techat01",
+            "",
+            "",
+            "",
+            "{}",
+            True,
+            aliases_text="@techat01, techat",
+        )
+
+        main_workflow_id = self.service.save_workflow(None, "Main Workflow", "", True)
+        step_id = self.service.save_step(
+            None,
+            main_workflow_id,
+            1,
+            "Switch Account",
+            "switch_account",
+            json.dumps({"platform_key": "shopee", "account_name": "@techat01", "launch_package_first": True}),
+            True,
+        )
+
+        result = self.service.execute_step(main_workflow_id, step_id, device_id)
+
+        self.assertTrue(result["success"])
+        device_platform = self.account_service.get_device_platform(device_platform_id)
+        self.assertEqual(int(device_platform["current_account_id"]), account_id)
+
+    def test_save_account_rejects_conflicting_alias_identity(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            None,
+            True,
+        )
+        self.account_service.save_account(
+            None,
+            device_platform_id,
+            "techat01",
+            "",
+            "",
+            "",
+            "{}",
+            True,
+            aliases_text="@techat01, techat",
+        )
+
+        with self.assertRaisesRegex(ValueError, "already belongs"):
+            self.account_service.save_account(
+                None,
+                device_platform_id,
+                "another",
+                "",
+                "",
+                "",
+                "{}",
+                True,
+                aliases_text="  @techat01  ",
+            )
+
+    def test_save_account_allows_case_distinct_identity_values(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            None,
+            True,
+        )
+        first_account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "Techat01",
+            "",
+            "",
+            "",
+            "{}",
+            True,
+            aliases_text="@TechatMain",
+        )
+        second_account_id = self.account_service.save_account(
+            None,
+            device_platform_id,
+            "techat01",
+            "",
+            "",
+            "",
+            "{}",
+            True,
+            aliases_text="@techatmain",
+        )
+
+        self.assertNotEqual(first_account_id, second_account_id)
+
+    def test_switch_account_alias_lookup_is_case_sensitive(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)
+        self.service.save_step(
+            None,
+            switch_workflow_id,
+            1,
+            "Capture Account",
+            "set_variable",
+            json.dumps(
+                {
+                    "variable_name": "switched_to",
+                    "value_mode": "template",
+                    "value": "${account.get('display_name')}",
+                }
+            ),
+            True,
+        )
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            switch_workflow_id,
+            True,
+        )
+        self.account_service.save_account(
+            None,
+            device_platform_id,
+            "Techat01",
+            "",
+            "",
+            "",
+            "{}",
+            True,
+            aliases_text="@Techat01",
+        )
+
+        with self.assertRaisesRegex(ValueError, "Account not found"):
+            self.account_service.resolve_switch_target(device_id, "shopee", account_name="@techat01")
+
     def test_execute_workflow_injects_selected_account_context_and_filters_logs(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
         workflow_id = self.service.save_workflow(None, "Context Run", "", True)

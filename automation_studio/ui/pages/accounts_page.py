@@ -91,8 +91,8 @@ class AccountsPage(QtWidgets.QWidget):
         account_layout.setSpacing(10)
         account_layout.addWidget(make_form_label("Accounts In Platform"))
 
-        self.account_table = QtWidgets.QTableWidget(0, 6)
-        self.account_table.setHorizontalHeaderLabels(["ID", "Display Name", "Username", "Login ID", "State", "Current"])
+        self.account_table = QtWidgets.QTableWidget(0, 7)
+        self.account_table.setHorizontalHeaderLabels(["ID", "Display Name", "Username", "Login ID", "Aliases", "State", "Current"])
         self.account_table.verticalHeader().setVisible(False)
         self.account_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.account_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
@@ -105,6 +105,9 @@ class AccountsPage(QtWidgets.QWidget):
         self.display_name_input = QtWidgets.QLineEdit()
         self.username_input = QtWidgets.QLineEdit()
         self.login_id_input = QtWidgets.QLineEdit()
+        self.aliases_input = QtWidgets.QPlainTextEdit()
+        self.aliases_input.setPlaceholderText("@alias-one, alias-two")
+        self.aliases_input.setFixedHeight(70)
         self.metadata_input = QtWidgets.QPlainTextEdit()
         self.metadata_input.setFixedHeight(90)
         self.notes_input = QtWidgets.QPlainTextEdit()
@@ -114,6 +117,7 @@ class AccountsPage(QtWidgets.QWidget):
         account_form.addRow("Display Name", self.display_name_input)
         account_form.addRow("Username", self.username_input)
         account_form.addRow("Login ID", self.login_id_input)
+        account_form.addRow("Aliases", self.aliases_input)
         account_form.addRow("Metadata JSON", self.metadata_input)
         account_form.addRow("Notes", self.notes_input)
         account_form.addRow("", self.account_enabled_check)
@@ -231,6 +235,7 @@ class AccountsPage(QtWidgets.QWidget):
                 account["display_name"],
                 account.get("username") or "",
                 account.get("login_id") or "",
+                str(account.get("alias_names") or "").replace("\n", ", "),
                 "Enabled" if account["is_enabled"] else "Disabled",
                 "Current" if int(account.get("is_current", 0) or 0) else "",
             ]
@@ -273,6 +278,7 @@ class AccountsPage(QtWidgets.QWidget):
         self.display_name_input.setText(str(account.get("display_name") or ""))
         self.username_input.setText(str(account.get("username") or ""))
         self.login_id_input.setText(str(account.get("login_id") or ""))
+        self.aliases_input.setPlainText(str(account.get("alias_names") or ""))
         self.notes_input.setPlainText(str(account.get("notes") or ""))
         self.metadata_input.setPlainText(str(account.get("metadata_json") or "{}"))
         self.account_enabled_check.setChecked(bool(account.get("is_enabled", 1)))
@@ -296,6 +302,7 @@ class AccountsPage(QtWidgets.QWidget):
         self.display_name_input.clear()
         self.username_input.clear()
         self.login_id_input.clear()
+        self.aliases_input.clear()
         self.metadata_input.setPlainText("{}")
         self.notes_input.clear()
         self.account_enabled_check.setChecked(True)
@@ -367,6 +374,7 @@ class AccountsPage(QtWidgets.QWidget):
                 self.notes_input.toPlainText().strip(),
                 self.metadata_input.toPlainText().strip(),
                 self.account_enabled_check.isChecked(),
+                aliases_text=self.aliases_input.toPlainText().strip(),
             )
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Save account failed", str(exc))

@@ -76,6 +76,8 @@ class DatabaseManager:
             (7, self._migration_007_log_watcher_index),
             (8, self._migration_008_watcher_profiles),
             (9, self._migration_009_accounts),
+            (10, self._migration_010_account_aliases),
+            (11, self._migration_011_account_identity_case_sensitive),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -331,3 +333,98 @@ class DatabaseManager:
             )
             """
         )
+
+    def _migration_010_account_aliases(self, connection: sqlite3.Connection) -> None:
+        if not self._column_exists(connection, "accounts", "display_name_normalized"):
+            connection.execute(
+                """
+                ALTER TABLE accounts
+                ADD COLUMN display_name_normalized TEXT NOT NULL DEFAULT ''
+                """
+            )
+        if not self._column_exists(connection, "accounts", "username_normalized"):
+            connection.execute(
+                """
+                ALTER TABLE accounts
+                ADD COLUMN username_normalized TEXT NOT NULL DEFAULT ''
+                """
+            )
+        if not self._column_exists(connection, "accounts", "login_id_normalized"):
+            connection.execute(
+                """
+                ALTER TABLE accounts
+                ADD COLUMN login_id_normalized TEXT NOT NULL DEFAULT ''
+                """
+            )
+
+        if self._table_exists(connection, "accounts"):
+            connection.execute(
+                """
+                UPDATE accounts
+                SET
+                    display_name_normalized = LOWER(LTRIM(TRIM(display_name), '@')),
+                    username_normalized = LOWER(LTRIM(TRIM(username), '@')),
+                    login_id_normalized = LOWER(LTRIM(TRIM(login_id), '@'))
+                """
+            )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                device_platform_id INTEGER NOT NULL,
+                alias_name TEXT NOT NULL,
+                alias_normalized TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(device_platform_id, alias_normalized),
+                UNIQUE(account_id, alias_normalized),
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+                FOREIGN KEY(device_platform_id) REFERENCES device_platforms(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_platform_display_name_normalized
+            ON accounts(device_platform_id, display_name_normalized)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_platform_username_normalized
+            ON accounts(device_platform_id, username_normalized)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_accounts_platform_login_id_normalized
+            ON accounts(device_platform_id, login_id_normalized)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_account_aliases_platform_normalized
+            ON account_aliases(device_platform_id, alias_normalized)
+            """
+        )
+
+    def _migration_011_account_identity_case_sensitive(self, connection: sqlite3.Connection) -> None:
+        if self._table_exists(connection, "accounts"):
+            connection.execute(
+                """
+                UPDATE accounts
+                SET
+                    display_name_normalized = LTRIM(TRIM(display_name), '@'),
+                    username_normalized = LTRIM(TRIM(username), '@'),
+                    login_id_normalized = LTRIM(TRIM(login_id), '@')
+                """
+            )
+        if self._table_exists(connection, "account_aliases"):
+            connection.execute(
+                """
+                UPDATE account_aliases
+                SET alias_normalized = LTRIM(TRIM(alias_name), '@')
+                """
+            )

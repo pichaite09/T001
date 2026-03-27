@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -498,6 +499,7 @@ class AccountService:
         notes: str,
         metadata_text: str,
         is_enabled: bool = True,
+        aliases_text: str = "",
     ) -> int:
         platform = self.account_repository.get_device_platform(device_platform_id)
         if not platform:
@@ -505,23 +507,58 @@ class AccountService:
         normalized_display_name = str(display_name or "").strip()
         if not normalized_display_name:
             raise ValueError("Account display name is required")
+        normalized_username = str(username or "").strip()
+        normalized_login_id = str(login_id or "").strip()
+        base_identity_values = {
+            self._normalize_identity(normalized_display_name),
+            self._normalize_identity(normalized_username),
+            self._normalize_identity(normalized_login_id),
+        }
+        aliases = [
+            alias_name
+            for alias_name in self._parse_aliases_text(aliases_text)
+            if self._normalize_identity(alias_name) not in {value for value in base_identity_values if value}
+        ]
+        candidate_identities = self._identity_values(
+            normalized_display_name,
+            normalized_username,
+            normalized_login_id,
+            aliases,
+        )
+        if not candidate_identities:
+            raise ValueError("Account must provide at least one display name or alias")
         try:
             parsed_metadata = json.loads(metadata_text or "{}")
         except json.JSONDecodeError as exc:
             raise ValueError(f"Metadata JSON is invalid: {exc}") from exc
-        existing = self.account_repository.get_account_by_name(device_platform_id, normalized_display_name)
-        if existing and int(existing["id"]) != int(account_id or 0):
-            raise ValueError("Account display name already exists for this platform")
-        return self.account_repository.upsert_account(
+        conflicting_account = self._find_account_identity_conflict(
+            device_platform_id=device_platform_id,
+            identity_values=candidate_identities,
+            exclude_account_id=account_id,
+        )
+        if conflicting_account:
+            conflict_name = str(conflicting_account.get("display_name") or f"#{conflicting_account['id']}")
+            raise ValueError(f"Account name or alias already belongs to '{conflict_name}' on this platform")
+
+        saved_account_id = self.account_repository.upsert_account(
             account_id=account_id,
             device_platform_id=device_platform_id,
             display_name=normalized_display_name,
-            username=str(username or "").strip(),
-            login_id=str(login_id or "").strip(),
+            display_name_normalized=self._normalize_identity(normalized_display_name),
+            username=normalized_username,
+            username_normalized=self._normalize_identity(normalized_username),
+            login_id=normalized_login_id,
+            login_id_normalized=self._normalize_identity(normalized_login_id),
             notes=str(notes or "").strip(),
             metadata_json=json.dumps(parsed_metadata, indent=2, ensure_ascii=False),
             is_enabled=is_enabled,
         )
+        self.account_repository.replace_account_aliases(
+            saved_account_id,
+            device_platform_id,
+            [(alias_name, self._normalize_identity(alias_name)) for alias_name in aliases],
+        )
+        return saved_account_id
 
     def delete_account(self, account_id: int) -> None:
         self.account_repository.delete_account(account_id)
@@ -546,7 +583,10 @@ class AccountService:
             if not account or int(account["device_platform_id"]) != int(device_platform["id"]):
                 raise ValueError("Account not found for this platform")
         else:
-            account = self.account_repository.get_account_by_name(int(device_platform["id"]), str(account_name or "").strip())
+            normalized_account_name = self._normalize_identity(account_name)
+            if not normalized_account_name:
+                raise ValueError("Account name is required")
+            account = self.account_repository.get_account_by_identity(int(device_platform["id"]), normalized_account_name)
             if not account:
                 raise ValueError("Account not found for this platform")
         if not bool(account.get("is_enabled", 1)):
@@ -625,6 +665,7 @@ class AccountService:
                 "display_name": str(resolved_account.get("display_name") or ""),
                 "username": str(resolved_account.get("username") or ""),
                 "login_id": str(resolved_account.get("login_id") or ""),
+                "aliases": self._parse_aliases_text(str(resolved_account.get("alias_names") or "")),
                 "notes": str(resolved_account.get("notes") or ""),
                 "metadata": json.loads(resolved_account.get("metadata_json") or "{}"),
             }
@@ -647,6 +688,63 @@ class AccountService:
             )
 
         return runtime_context, metadata
+
+    def _normalize_identity(self, value: str | None) -> str:
+        return str(value or "").strip().lstrip("@").strip()
+
+    def _parse_aliases_text(self, aliases_text: str | None) -> list[str]:
+        parts = re.split(r"[\r\n,;]+", str(aliases_text or ""))
+        aliases: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            alias_name = str(part or "").strip()
+            if not alias_name:
+                continue
+            normalized = self._normalize_identity(alias_name)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            aliases.append(alias_name)
+        return aliases
+
+    def _identity_values(
+        self,
+        display_name: str,
+        username: str,
+        login_id: str,
+        aliases: list[str],
+    ) -> set[str]:
+        values = {
+            self._normalize_identity(display_name),
+            self._normalize_identity(username),
+            self._normalize_identity(login_id),
+        }
+        values.update(self._normalize_identity(alias_name) for alias_name in aliases)
+        return {value for value in values if value}
+
+    def _account_identity_values(self, account: dict[str, Any]) -> set[str]:
+        return self._identity_values(
+            str(account.get("display_name") or ""),
+            str(account.get("username") or ""),
+            str(account.get("login_id") or ""),
+            self._parse_aliases_text(str(account.get("alias_names") or "")),
+        )
+
+    def _find_account_identity_conflict(
+        self,
+        *,
+        device_platform_id: int,
+        identity_values: set[str],
+        exclude_account_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        if not identity_values:
+            return None
+        for account in self.account_repository.list_accounts(device_platform_id):
+            if int(account["id"]) == int(exclude_account_id or 0):
+                continue
+            if self._account_identity_values(account) & identity_values:
+                return account
+        return None
 
 
 class WorkflowService:

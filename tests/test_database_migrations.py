@@ -15,7 +15,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             db = DatabaseManager(db_path)
             db.init_schema()
 
-            self.assertEqual(db.current_schema_version(), 9)
+            self.assertEqual(db.current_schema_version(), 11)
 
             with db.connection() as connection:
                 workflow_columns = {
@@ -45,16 +45,24 @@ class DatabaseMigrationTests(unittest.TestCase):
                         'watcher_profile_items',
                         'workflow_watcher_profiles',
                         'device_platforms',
-                        'accounts'
+                        'accounts',
+                        'account_aliases'
                       )
                     """
                 ).fetchall()
+                account_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+                }
 
             self.assertIn("definition_version", workflow_columns)
             self.assertIn("schema_version", step_columns)
             self.assertIn("watcher_id", log_columns)
+            self.assertIn("display_name_normalized", account_columns)
+            self.assertIn("username_normalized", account_columns)
+            self.assertIn("login_id_normalized", account_columns)
             self.assertTrue(telemetry_tables)
-            self.assertEqual(len(watcher_tables), 7)
+            self.assertEqual(len(watcher_tables), 8)
         finally:
             if os.path.exists(db_path):
                 os.remove(db_path)

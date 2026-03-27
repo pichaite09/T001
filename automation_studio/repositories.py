@@ -746,6 +746,19 @@ class AccountRepository:
     def __init__(self, db: DatabaseManager) -> None:
         self.db = db
 
+    def _account_alias_summary_join(self) -> str:
+        return """
+            LEFT JOIN (
+                SELECT
+                    account_id,
+                    GROUP_CONCAT(alias_name, '\n') AS alias_names,
+                    COUNT(*) AS alias_count
+                FROM account_aliases
+                GROUP BY account_id
+            ) AS account_alias_summary
+                ON account_alias_summary.account_id = accounts.id
+        """
+
     def list_device_platforms(self, device_id: int) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
             rows = connection.execute(
@@ -876,17 +889,20 @@ class AccountRepository:
     def list_accounts(self, device_platform_id: int) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                     accounts.*,
                     device_platforms.platform_key,
                     device_platforms.platform_name,
+                    COALESCE(account_alias_summary.alias_names, '') AS alias_names,
+                    COALESCE(account_alias_summary.alias_count, 0) AS alias_count,
                     CASE
                         WHEN device_platforms.current_account_id = accounts.id THEN 1
                         ELSE 0
                     END AS is_current
                 FROM accounts
                 INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
+                {self._account_alias_summary_join()}
                 WHERE accounts.device_platform_id = ?
                 ORDER BY accounts.display_name COLLATE NOCASE, accounts.id
                 """,
@@ -897,7 +913,7 @@ class AccountRepository:
     def get_account(self, account_id: int) -> dict[str, Any] | None:
         with self.db.connection() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT
                     accounts.*,
                     device_platforms.device_id,
@@ -905,12 +921,15 @@ class AccountRepository:
                     device_platforms.platform_name,
                     device_platforms.package_name,
                     device_platforms.switch_workflow_id,
+                    COALESCE(account_alias_summary.alias_names, '') AS alias_names,
+                    COALESCE(account_alias_summary.alias_count, 0) AS alias_count,
                     CASE
                         WHEN device_platforms.current_account_id = accounts.id THEN 1
                         ELSE 0
                     END AS is_current
                 FROM accounts
                 INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
+                {self._account_alias_summary_join()}
                 WHERE accounts.id = ?
                 """,
                 (account_id,),
@@ -920,7 +939,7 @@ class AccountRepository:
     def get_account_by_name(self, device_platform_id: int, display_name: str) -> dict[str, Any] | None:
         with self.db.connection() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT
                     accounts.*,
                     device_platforms.device_id,
@@ -928,15 +947,60 @@ class AccountRepository:
                     device_platforms.platform_name,
                     device_platforms.package_name,
                     device_platforms.switch_workflow_id,
+                    COALESCE(account_alias_summary.alias_names, '') AS alias_names,
+                    COALESCE(account_alias_summary.alias_count, 0) AS alias_count,
                     CASE
                         WHEN device_platforms.current_account_id = accounts.id THEN 1
                         ELSE 0
                     END AS is_current
                 FROM accounts
                 INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
-                WHERE accounts.device_platform_id = ? AND LOWER(accounts.display_name) = LOWER(?)
+                {self._account_alias_summary_join()}
+                WHERE accounts.device_platform_id = ? AND accounts.display_name = ?
                 """,
                 (device_platform_id, display_name),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def get_account_by_identity(self, device_platform_id: int, identity_normalized: str) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT
+                    accounts.*,
+                    device_platforms.device_id,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    device_platforms.package_name,
+                    device_platforms.switch_workflow_id,
+                    COALESCE(account_alias_summary.alias_names, '') AS alias_names,
+                    COALESCE(account_alias_summary.alias_count, 0) AS alias_count,
+                    CASE
+                        WHEN device_platforms.current_account_id = accounts.id THEN 1
+                        ELSE 0
+                    END AS is_current
+                FROM accounts
+                INNER JOIN device_platforms ON device_platforms.id = accounts.device_platform_id
+                {self._account_alias_summary_join()}
+                LEFT JOIN account_aliases
+                    ON account_aliases.account_id = accounts.id
+                WHERE accounts.device_platform_id = ?
+                  AND (
+                    accounts.display_name_normalized = ?
+                    OR accounts.username_normalized = ?
+                    OR accounts.login_id_normalized = ?
+                    OR account_aliases.alias_normalized = ?
+                  )
+                ORDER BY accounts.id
+                LIMIT 1
+                """,
+                (
+                    device_platform_id,
+                    identity_normalized,
+                    identity_normalized,
+                    identity_normalized,
+                    identity_normalized,
+                ),
             ).fetchone()
         return row_to_dict(row) if row else None
 
@@ -945,8 +1009,11 @@ class AccountRepository:
         account_id: int | None,
         device_platform_id: int,
         display_name: str,
+        display_name_normalized: str,
         username: str,
+        username_normalized: str,
         login_id: str,
+        login_id_normalized: str,
         notes: str,
         metadata_json: str,
         is_enabled: bool = True,
@@ -957,14 +1024,18 @@ class AccountRepository:
                 connection.execute(
                     """
                     UPDATE accounts
-                    SET display_name = ?, username = ?, login_id = ?, notes = ?, metadata_json = ?,
+                    SET display_name = ?, display_name_normalized = ?, username = ?, username_normalized = ?,
+                        login_id = ?, login_id_normalized = ?, notes = ?, metadata_json = ?,
                         is_enabled = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (
                         display_name,
+                        display_name_normalized,
                         username,
+                        username_normalized,
                         login_id,
+                        login_id_normalized,
                         notes,
                         metadata_json,
                         int(is_enabled),
@@ -978,16 +1049,20 @@ class AccountRepository:
             cursor = connection.execute(
                 """
                 INSERT INTO accounts (
-                    device_platform_id, display_name, username, login_id, notes, metadata_json,
+                    device_platform_id, display_name, display_name_normalized, username, username_normalized,
+                    login_id, login_id_normalized, notes, metadata_json,
                     is_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     device_platform_id,
                     display_name,
+                    display_name_normalized,
                     username,
+                    username_normalized,
                     login_id,
+                    login_id_normalized,
                     notes,
                     metadata_json,
                     int(is_enabled),
@@ -996,6 +1071,34 @@ class AccountRepository:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def list_account_aliases(self, account_id: int) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM account_aliases
+                WHERE account_id = ?
+                ORDER BY alias_name COLLATE NOCASE, id
+                """,
+                (account_id,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def replace_account_aliases(self, account_id: int, device_platform_id: int, aliases: list[tuple[str, str]]) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM account_aliases WHERE account_id = ?", (account_id,))
+            for alias_name, alias_normalized in aliases:
+                connection.execute(
+                    """
+                    INSERT INTO account_aliases (
+                        account_id, device_platform_id, alias_name, alias_normalized, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (account_id, device_platform_id, alias_name, alias_normalized, timestamp, timestamp),
+                )
 
     def delete_account(self, account_id: int) -> None:
         with self.db.connection() as connection:
