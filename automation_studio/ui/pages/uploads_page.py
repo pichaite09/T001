@@ -61,7 +61,11 @@ class UploadsPage(QtWidgets.QWidget):
         self._batch_run_thread: UploadBatchRunThread | None = None
         self._jobs_by_id: dict[int, dict] = {}
         self._templates_by_id: dict[int, dict] = {}
+        self._settings = QtCore.QSettings("AutomationStudio", "UploadsPage")
+        self._auto_run_timer = QtCore.QTimer(self)
+        self._auto_run_timer.timeout.connect(self._check_auto_run_draft_jobs)
         self._build_ui()
+        self._restore_auto_run_settings()
         self.refresh_devices()
         self.refresh_workflows()
         self.refresh_templates()
@@ -130,6 +134,29 @@ class UploadsPage(QtWidgets.QWidget):
         template_layout.addWidget(self.save_template_button)
         template_layout.addWidget(self.delete_template_button)
         root.addWidget(template_card)
+
+        auto_card = CardFrame()
+        auto_layout = QtWidgets.QHBoxLayout(auto_card)
+        auto_layout.setContentsMargins(14, 12, 14, 12)
+        auto_layout.setSpacing(10)
+        auto_label = QtWidgets.QLabel("Auto Draft Runner")
+        auto_label.setObjectName("subtitleLabel")
+        self.auto_run_checkbox = QtWidgets.QCheckBox("Auto Run Draft Jobs")
+        self.auto_run_interval_combo = QtWidgets.QComboBox()
+        self.auto_run_interval_combo.addItem("5 sec", 5)
+        self.auto_run_interval_combo.addItem("10 sec", 10)
+        self.auto_run_interval_combo.addItem("30 sec", 30)
+        self.auto_run_interval_combo.addItem("60 sec", 60)
+        self.auto_run_state_label = QtWidgets.QLabel("Auto runner: off")
+        self.auto_run_state_label.setObjectName("subtitleLabel")
+        self.auto_run_state_label.setWordWrap(True)
+        auto_layout.addWidget(auto_label)
+        auto_layout.addWidget(self.auto_run_checkbox)
+        auto_layout.addWidget(QtWidgets.QLabel("Check every"))
+        auto_layout.addWidget(self.auto_run_interval_combo)
+        auto_layout.addStretch(1)
+        auto_layout.addWidget(self.auto_run_state_label, 1)
+        root.addWidget(auto_card)
 
         splitter = QtWidgets.QSplitter()
         splitter.setChildrenCollapsible(False)
@@ -248,6 +275,8 @@ class UploadsPage(QtWidgets.QWidget):
         self.upload_table.itemDoubleClicked.connect(lambda *_: self.run_now())
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
         self.platform_combo.currentIndexChanged.connect(self._on_platform_changed)
+        self.auto_run_checkbox.toggled.connect(self._on_auto_run_toggled)
+        self.auto_run_interval_combo.currentIndexChanged.connect(self._on_auto_run_interval_changed)
         self._sync_actions()
 
     def refresh_devices(self) -> None:
@@ -548,18 +577,7 @@ class UploadsPage(QtWidgets.QWidget):
         if not self.current_upload_job_id:
             QtWidgets.QMessageBox.information(self, "Uploads", "Select an upload job first.")
             return
-        if self._run_thread and self._run_thread.isRunning():
-            self.status_label.setText("Upload run is already in progress.")
-            return
-        if self._batch_run_thread and self._batch_run_thread.isRunning():
-            self.status_label.setText("Batch upload run is already in progress.")
-            return
-        self.status_label.setText(f"Running upload job #{self.current_upload_job_id} now...")
-        self._run_thread = UploadRunThread(self.upload_service, int(self.current_upload_job_id))
-        self._run_thread.result_ready.connect(self._on_run_result)
-        self._run_thread.finished.connect(self._on_run_finished)
-        self._run_thread.start()
-        self._sync_actions()
+        self._start_single_run(int(self.current_upload_job_id), source_label="manual")
 
     def run_selected(self) -> None:
         selected_ids = self._selected_upload_job_ids()
@@ -589,16 +607,42 @@ class UploadsPage(QtWidgets.QWidget):
         self._batch_run_thread.start()
         self._sync_actions()
 
+    def _start_single_run(self, upload_job_id: int, *, source_label: str = "manual") -> bool:
+        if self._run_thread and self._run_thread.isRunning():
+            self.status_label.setText("Upload run is already in progress.")
+            return False
+        if self._batch_run_thread and self._batch_run_thread.isRunning():
+            self.status_label.setText("Batch upload run is already in progress.")
+            return False
+        try:
+            self.upload_service.mark_upload_job_queued(int(upload_job_id))
+        except Exception as exc:
+            self.status_label.setText(str(exc))
+            return False
+        self.load_upload_jobs()
+        if source_label == "auto":
+            self.status_label.setText(f"Auto runner queued upload job #{upload_job_id}.")
+        else:
+            self.status_label.setText(f"Queued upload job #{upload_job_id} for execution.")
+        self._run_thread = UploadRunThread(self.upload_service, int(upload_job_id))
+        self._run_thread.result_ready.connect(self._on_run_result)
+        self._run_thread.finished.connect(self._on_run_finished)
+        self._run_thread.start()
+        self._sync_actions()
+        return True
+
     def _on_run_result(self, upload_job_id: int, result: dict) -> None:
         status = "completed" if result.get("success") else "failed"
-        self.status_label.setText(f"Upload job #{upload_job_id} {status}: {result.get('message') or '-'}")
         self.load_upload_jobs()
         self._select_upload_row(upload_job_id)
+        self.status_label.setText(f"Upload job #{upload_job_id} {status}: {result.get('message') or '-'}")
         self.logs_changed.emit()
 
     def _on_run_finished(self) -> None:
         self._run_thread = None
         self._sync_actions()
+        if self.auto_run_checkbox.isChecked():
+            QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
 
     def _on_batch_run_result(self, result: dict) -> None:
         self.load_upload_jobs()
@@ -610,6 +654,8 @@ class UploadsPage(QtWidgets.QWidget):
     def _on_batch_run_finished(self) -> None:
         self._batch_run_thread = None
         self._sync_actions()
+        if self.auto_run_checkbox.isChecked():
+            QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
 
     def import_upload_jobs(self) -> None:
         path_text, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -671,6 +717,9 @@ class UploadsPage(QtWidgets.QWidget):
         self.apply_template_button.setEnabled(has_template and not busy)
         self.save_template_button.setEnabled(not busy)
         self.delete_template_button.setEnabled(has_template and not busy)
+        self.auto_run_interval_combo.setEnabled(not busy)
+        self.auto_run_checkbox.setEnabled(True)
+        self._update_auto_run_state_label(busy=busy)
 
     def _set_combo_data(self, combo: QtWidgets.QComboBox, value) -> None:
         index = combo.findData(value)
@@ -695,3 +744,76 @@ class UploadsPage(QtWidgets.QWidget):
                 continue
             ids.append(int(cell.text()))
         return ids
+
+    def _restore_auto_run_settings(self) -> None:
+        enabled = str(self._settings.value("auto_run_enabled", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        interval_seconds = int(self._settings.value("auto_run_interval_seconds", 10) or 10)
+        index = self.auto_run_interval_combo.findData(interval_seconds)
+        self.auto_run_interval_combo.setCurrentIndex(index if index >= 0 else 1)
+        self.auto_run_checkbox.setChecked(enabled)
+        self._apply_auto_run_timer_state()
+
+    def _store_auto_run_settings(self) -> None:
+        self._settings.setValue("auto_run_enabled", self.auto_run_checkbox.isChecked())
+        self._settings.setValue("auto_run_interval_seconds", int(self.auto_run_interval_combo.currentData() or 10))
+        self._settings.sync()
+
+    def _on_auto_run_toggled(self) -> None:
+        self._store_auto_run_settings()
+        self._apply_auto_run_timer_state()
+        self._sync_actions()
+        if self.auto_run_checkbox.isChecked():
+            QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
+
+    def _on_auto_run_interval_changed(self) -> None:
+        self._store_auto_run_settings()
+        self._apply_auto_run_timer_state()
+        self._sync_actions()
+
+    def _apply_auto_run_timer_state(self) -> None:
+        interval_seconds = int(self.auto_run_interval_combo.currentData() or 10)
+        self._auto_run_timer.setInterval(max(interval_seconds, 1) * 1000)
+        if self.auto_run_checkbox.isChecked():
+            self._auto_run_timer.start()
+        else:
+            self._auto_run_timer.stop()
+
+    def _update_auto_run_state_label(self, *, busy: bool) -> None:
+        interval_seconds = int(self.auto_run_interval_combo.currentData() or 10)
+        if not self.auto_run_checkbox.isChecked():
+            self.auto_run_state_label.setText("Auto runner: off")
+            return
+        if busy:
+            self.auto_run_state_label.setText(f"Auto runner: waiting for current run to finish ({interval_seconds} sec)")
+            return
+        next_job_id = self._next_draft_upload_job_id()
+        if next_job_id is None:
+            self.auto_run_state_label.setText(f"Auto runner: on, checking every {interval_seconds} sec")
+        else:
+            self.auto_run_state_label.setText(
+                f"Auto runner: draft job #{next_job_id} ready, checking every {interval_seconds} sec"
+            )
+
+    def _next_draft_upload_job_id(self) -> int | None:
+        draft_ids = [
+            int(job["id"])
+            for job in self._jobs_by_id.values()
+            if str(job.get("status") or "draft") == "draft"
+        ]
+        return min(draft_ids) if draft_ids else None
+
+    def _check_auto_run_draft_jobs(self) -> None:
+        if not self.auto_run_checkbox.isChecked():
+            return
+        if self._run_thread and self._run_thread.isRunning():
+            self._sync_actions()
+            return
+        if self._batch_run_thread and self._batch_run_thread.isRunning():
+            self._sync_actions()
+            return
+        self.load_upload_jobs()
+        next_job_id = self._next_draft_upload_job_id()
+        if next_job_id is None:
+            self._sync_actions()
+            return
+        self._start_single_run(next_job_id, source_label="auto")

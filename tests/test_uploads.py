@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from automation_studio.database import DatabaseManager
 from automation_studio.repositories import (
@@ -68,6 +68,9 @@ class UploadTests(unittest.TestCase):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     def setUp(self) -> None:
+        self.settings = QtCore.QSettings("AutomationStudio", "UploadsPage")
+        self.settings.clear()
+        self.settings.sync()
         fd, self.db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         self.db = DatabaseManager(self.db_path)
@@ -117,8 +120,17 @@ class UploadTests(unittest.TestCase):
         self.workflow_service.bind_upload_service(self.upload_service)
 
     def tearDown(self) -> None:
+        self.settings.clear()
+        self.settings.sync()
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
+
+    def _wait_for(self, predicate, *, timeout_ms: int = 3000) -> None:
+        deadline = QtCore.QTime.currentTime().addMSecs(timeout_ms)
+        while not predicate():
+            if QtCore.QTime.currentTime() > deadline:
+                self.fail("Timed out waiting for condition")
+            self.app.processEvents()
 
     def test_execute_upload_job_injects_upload_context_into_workflow(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
@@ -725,6 +737,66 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(page.cover_url_input.text(), "https://cdn.example.com/page.jpg")
         self.assertEqual(page.local_video_path_input.text(), "D:/videos/page.mp4")
         self.assertIn('"source": "template"', page.metadata_input.toPlainText())
+        page.close()
+
+    def test_uploads_page_restores_auto_runner_settings(self) -> None:
+        self.settings.setValue("auto_run_enabled", True)
+        self.settings.setValue("auto_run_interval_seconds", 30)
+        self.settings.sync()
+
+        page = UploadsPage(
+            self.upload_service,
+            self.workflow_service,
+            self.device_service,
+            self.account_service,
+        )
+
+        self.assertTrue(page.auto_run_checkbox.isChecked())
+        self.assertEqual(int(page.auto_run_interval_combo.currentData() or 0), 30)
+        self.assertTrue(page._auto_run_timer.isActive())
+        page.close()
+
+    def test_uploads_page_auto_runner_executes_next_draft_job(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        workflow_id = self.workflow_service.save_workflow(None, "Auto Upload Workflow", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Echo Upload Title",
+            "shell",
+            json.dumps({"command": "echo ${upload.get('title')}"}, ensure_ascii=False),
+            True,
+        )
+        upload_job_id = self.upload_service.save_upload_job(
+            None,
+            device_id=device_id,
+            device_platform_id=None,
+            account_id=None,
+            workflow_id=workflow_id,
+            code_product="SKU-AUTO",
+            link_product="https://example.com/auto",
+            title="Auto Upload",
+            description="",
+            tags_text="",
+            video_url="https://cdn.example.com/auto.mp4",
+        )
+
+        page = UploadsPage(
+            self.upload_service,
+            self.workflow_service,
+            self.device_service,
+            self.account_service,
+        )
+        page.auto_run_interval_combo.setCurrentIndex(page.auto_run_interval_combo.findData(5))
+        page.auto_run_checkbox.setChecked(True)
+        page._check_auto_run_draft_jobs()
+        self._wait_for(lambda: page._run_thread is None)
+
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+        self.assertEqual(upload_job["status"], "success")
+        self.assertEqual(self.fake_device.actions, [("shell", "echo Auto Upload")])
+        self.assertIn("completed", page.status_label.text().lower())
         page.close()
 
 
