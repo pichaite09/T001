@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from PySide6 import QtWidgets
 
@@ -178,6 +179,50 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(metadata["upload_code_product"], "SKU-123")
         self.assertTrue(any(log["status"] == "upload_success" for log in logs))
 
+    def test_execute_upload_job_persists_downloaded_local_video_path(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        source_dir = Path(tempfile.mkdtemp())
+        source_path = source_dir / "video_source.mp4"
+        source_path.write_bytes(b"video")
+        download_dir = source_dir / "downloads"
+
+        workflow_id = self.workflow_service.save_workflow(None, "Upload Download Workflow", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Download",
+            "download_video_asset",
+            json.dumps(
+                {
+                    "video_url": str(source_path),
+                    "directory": str(download_dir),
+                    "filename": "saved.mp4",
+                },
+                ensure_ascii=False,
+            ),
+            True,
+        )
+        upload_job_id = self.upload_service.save_upload_job(
+            None,
+            device_id=device_id,
+            device_platform_id=None,
+            account_id=None,
+            workflow_id=workflow_id,
+            code_product="SKU-DL",
+            link_product="https://example.com/dl",
+            title="Upload Download",
+            description="",
+            tags_text="",
+            video_url=str(source_path),
+        )
+
+        result = self.upload_service.execute_upload_job(upload_job_id)
+
+        self.assertTrue(result["success"])
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+        self.assertEqual(upload_job["local_video_path"], str(download_dir / "saved.mp4"))
+
     def test_prepare_upload_context_step_can_load_job_by_id(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
         workflow_id = self.workflow_service.save_workflow(None, "Prepare Upload", "", True)
@@ -266,6 +311,206 @@ class UploadTests(unittest.TestCase):
         self.assertTrue(copied_path.exists())
         self.assertEqual(self.fake_device.actions[-1], ("shell", f"echo {copied_path}"))
 
+    def test_push_file_to_device_step_stores_device_path_in_upload_context(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        source_dir = Path(tempfile.mkdtemp())
+        source_path = source_dir / "video_source.mp4"
+        source_path.write_bytes(b"video")
+
+        workflow_id = self.workflow_service.save_workflow(None, "Push Upload Asset", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Push Video",
+            "push_file_to_device",
+            json.dumps(
+                {
+                    "local_path": str(source_path),
+                    "device_path": "/sdcard/Movies/upload_video.mp4",
+                    "create_parent": True,
+                },
+                ensure_ascii=False,
+            ),
+            True,
+        )
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            2,
+            "Use Device Video Path",
+            "shell",
+            json.dumps({"command": "echo ${upload.get('device_video_path')}"}, ensure_ascii=False),
+            True,
+        )
+
+        with patch("automation_studio.automation.engine.shutil.which", return_value="adb"), patch(
+            "automation_studio.automation.engine.subprocess.run"
+        ) as mock_run:
+            mock_run.side_effect = [
+                Mock(returncode=0, stdout="", stderr=""),
+                Mock(returncode=0, stdout="1 file pushed", stderr=""),
+                Mock(returncode=0, stdout="/sdcard/Movies/upload_video.mp4", stderr=""),
+                Mock(returncode=0, stdout="Broadcast completed", stderr=""),
+            ]
+            result = self.workflow_service.execute_workflow(workflow_id, device_id)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(self.fake_device.actions[-1], ("shell", "echo /sdcard/Movies/upload_video.mp4"))
+        self.assertEqual(mock_run.call_count, 4)
+        self.assertEqual(
+            mock_run.call_args_list[0].args[0],
+            ["adb", "-s", "SERIAL1", "shell", "mkdir", "-p", "/sdcard/Movies"],
+        )
+        self.assertEqual(
+            mock_run.call_args_list[1].args[0],
+            ["adb", "-s", "SERIAL1", "push", str(source_path), "/sdcard/Movies/upload_video.mp4"],
+        )
+        self.assertEqual(
+            mock_run.call_args_list[2].args[0],
+            ["adb", "-s", "SERIAL1", "shell", "ls /sdcard/Movies/upload_video.mp4"],
+        )
+
+    def test_delete_local_file_step_removes_file_and_clears_context(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        source_dir = Path(tempfile.mkdtemp())
+        source_path = source_dir / "video_source.mp4"
+        source_path.write_bytes(b"video")
+
+        workflow_id = self.workflow_service.save_workflow(None, "Delete Local Upload Asset", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Delete Video",
+            "delete_local_file",
+            json.dumps(
+                {
+                    "local_path": str(source_path),
+                    "missing_ok": False,
+                    "clear_upload_local_video_path": True,
+                },
+                ensure_ascii=False,
+            ),
+            True,
+        )
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            2,
+            "Use Cleared Local Video Path",
+            "shell",
+            json.dumps({"command": "echo ${upload.get('local_video_path')}"}, ensure_ascii=False),
+            True,
+        )
+
+        result = self.workflow_service.execute_workflow(
+            workflow_id,
+            device_id,
+            extra_context={
+                "upload": {"local_video_path": str(source_path)},
+                "vars": {"upload_local_video_path": str(source_path)},
+            },
+        )
+
+        self.assertTrue(result["success"])
+        self.assertFalse(source_path.exists())
+        self.assertEqual(self.fake_device.actions[-1], ("shell", "echo "))
+
+    def test_download_video_asset_uses_headers_for_http_sources(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        target_dir = Path(tempfile.mkdtemp()) / "downloads"
+        workflow_id = self.workflow_service.save_workflow(None, "Download With Headers", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Download Video",
+            "download_video_asset",
+            json.dumps(
+                {
+                    "video_url": "https://cdn.example.com/video.mp4",
+                    "directory": str(target_dir),
+                    "filename": "video.mp4",
+                    "referer": "https://example.com/post/1",
+                    "headers_json": json.dumps({"Authorization": "Bearer token-123"}),
+                    "timeout_seconds": 30,
+                },
+                ensure_ascii=False,
+            ),
+            True,
+        )
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                if getattr(self, "_done", False):
+                    return b""
+                self._done = True
+                return b"video-binary"
+
+        with patch("automation_studio.automation.engine.urlopen", return_value=FakeResponse()) as mock_urlopen:
+            result = self.workflow_service.execute_workflow(workflow_id, device_id)
+
+        self.assertTrue(result["success"])
+        downloaded_path = target_dir / "video.mp4"
+        self.assertTrue(downloaded_path.exists())
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://cdn.example.com/video.mp4")
+        self.assertEqual(request.get_header("Referer"), "https://example.com/post/1")
+        self.assertEqual(request.get_header("Authorization"), "Bearer token-123")
+        self.assertEqual(mock_urlopen.call_args.kwargs["timeout"], 30.0)
+
+    def test_execute_upload_job_persists_cleared_local_video_path(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        source_dir = Path(tempfile.mkdtemp())
+        source_path = source_dir / "video_source.mp4"
+        source_path.write_bytes(b"video")
+
+        workflow_id = self.workflow_service.save_workflow(None, "Upload Delete Workflow", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Delete Downloaded File",
+            "delete_local_file",
+            json.dumps(
+                {
+                    "local_path": "${upload.get('local_video_path')}",
+                    "missing_ok": False,
+                    "clear_upload_local_video_path": True,
+                },
+                ensure_ascii=False,
+            ),
+            True,
+        )
+        upload_job_id = self.upload_service.save_upload_job(
+            None,
+            device_id=device_id,
+            device_platform_id=None,
+            account_id=None,
+            workflow_id=workflow_id,
+            code_product="SKU-CLR",
+            link_product="https://example.com/clr",
+            title="Upload Clear",
+            description="",
+            tags_text="",
+            video_url="https://cdn.example.com/clr.mp4",
+            local_video_path=str(source_path),
+        )
+
+        result = self.upload_service.execute_upload_job(upload_job_id)
+
+        self.assertTrue(result["success"])
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+        self.assertEqual(upload_job["local_video_path"], "")
+        self.assertFalse(source_path.exists())
+
     def test_uploads_page_builds_and_populates_workflows(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
         self.workflow_service.save_workflow(None, "Upload Workflow", "", True)
@@ -315,6 +560,35 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(imported["code_product"], "SKU-100")
         self.assertEqual(imported["title"], "Upload 100")
         self.assertEqual(json.loads(imported["tags_json"]), ["a", "b"])
+
+    def test_save_upload_job_preserves_hashtag_tags(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        workflow_id = self.workflow_service.save_workflow(None, "Upload Workflow", "", True)
+
+        upload_job_id = self.upload_service.save_upload_job(
+            None,
+            device_id=device_id,
+            device_platform_id=None,
+            account_id=None,
+            workflow_id=workflow_id,
+            code_product="SKU-TAGS",
+            link_product="https://example.com/tags",
+            title="Upload Tags",
+            description="",
+            tags_text="#โทนเนอร์ใต้วงแขน #สาวผิวบอบบาง #ผิวคลีนมั่นใจ #ของมันต้องมี #IBLANC",
+            video_url="https://cdn.example.com/tags.mp4",
+        )
+
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+
+        self.assertEqual(
+            json.loads(upload_job["tags_json"]),
+            ["#โทนเนอร์ใต้วงแขน", "#สาวผิวบอบบาง", "#ผิวคลีนมั่นใจ", "#ของมันต้องมี", "#IBLANC"],
+        )
+        self.assertEqual(
+            self.upload_service.tags_to_text(upload_job["tags_json"]),
+            "#โทนเนอร์ใต้วงแขน #สาวผิวบอบบาง #ผิวคลีนมั่นใจ #ของมันต้องมี #IBLANC",
+        )
 
     def test_execute_upload_jobs_batch_runs_all_requested_jobs(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")

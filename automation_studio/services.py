@@ -1055,6 +1055,7 @@ class UploadService:
                 "upload_video_url": upload_context["video_url"],
                 "upload_cover_url": upload_context["cover_url"],
                 "upload_local_video_path": upload_context["local_video_path"],
+                "upload_device_video_path": upload_context["device_video_path"],
                 "upload_metadata": upload_context["metadata"],
             },
         }
@@ -1073,6 +1074,8 @@ class UploadService:
             extra_context=extra_context,
             extra_metadata=extra_metadata,
         )
+        updated_local_video_path = str(upload_context.get("local_video_path") or "").strip()
+        self.upload_repository.update_upload_local_video_path(upload_job_id, updated_local_video_path)
         final_status = "success" if bool(result.get("success")) else "failed"
         self.upload_repository.mark_upload_finished(
             upload_job_id,
@@ -1202,15 +1205,21 @@ class UploadService:
         }
 
     def _parse_tags_text(self, tags_text: str | None) -> list[str]:
-        parts = re.split(r"[\r\n,;#]+", str(tags_text or ""))
+        parts = re.split(r"[\r\n,;]+", str(tags_text or ""))
         tags: list[str] = []
         seen: set[str] = set()
         for part in parts:
             normalized = str(part or "").strip()
-            if not normalized or normalized in seen:
+            if not normalized:
                 continue
-            seen.add(normalized)
-            tags.append(normalized)
+            hashtag_parts = re.findall(r"#[^\s#]+", normalized)
+            candidates = hashtag_parts if hashtag_parts else [normalized]
+            for candidate in candidates:
+                cleaned = str(candidate or "").strip()
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                tags.append(cleaned)
         return tags
 
     def tags_to_text(self, tags_json: str | None) -> str:
@@ -1219,7 +1228,10 @@ class UploadService:
         except Exception:
             parsed = []
         if isinstance(parsed, list):
-            return ", ".join(str(item).strip() for item in parsed if str(item).strip())
+            normalized = [str(item).strip() for item in parsed if str(item).strip()]
+            if normalized and all(item.startswith("#") for item in normalized):
+                return " ".join(normalized)
+            return ", ".join(normalized)
         return ""
 
     def metadata_to_text(self, metadata_json: str | None) -> str:
@@ -1270,6 +1282,7 @@ class UploadService:
             "video_url": str(upload_job.get("video_url") or ""),
             "cover_url": str(upload_job.get("cover_url") or ""),
             "local_video_path": str(upload_job.get("local_video_path") or ""),
+            "device_video_path": "",
             "metadata": metadata,
             "status": str(upload_job.get("status") or "draft"),
         }
@@ -1688,6 +1701,7 @@ class WorkflowService:
                 "upload_video_url": upload_context["video_url"],
                 "upload_cover_url": upload_context["cover_url"],
                 "upload_local_video_path": upload_context["local_video_path"],
+                "upload_device_video_path": upload_context["device_video_path"],
                 "upload_metadata": upload_context["metadata"],
             }
         )

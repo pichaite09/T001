@@ -692,11 +692,21 @@ STEP_DEFINITIONS = [
             "video_url": "${upload.get('video_url')}",
             "directory": "artifacts/uploads",
             "filename": "upload_video.mp4",
+            "user_agent": "Mozilla/5.0",
+            "referer": "",
+            "cookies": "",
+            "headers_json": "",
+            "timeout_seconds": 60,
         },
         fields=(
             StepField("video_url", "Video URL", default="${upload.get('video_url')}", placeholder="https://example.com/video.mp4"),
             StepField("directory", "Directory", default="artifacts/uploads"),
             StepField("filename", "Filename", default="upload_video.mp4"),
+            StepField("user_agent", "User-Agent", default="Mozilla/5.0", placeholder="Mozilla/5.0 ..."),
+            StepField("referer", "Referer", default="", placeholder="https://example.com/page"),
+            StepField("cookies", "Cookies", field_type="textarea", default="", placeholder="session=abc; token=xyz"),
+            StepField("headers_json", "Headers JSON", field_type="textarea", default="", placeholder='{"Authorization": "Bearer ..."}'),
+            StepField("timeout_seconds", "Timeout (sec)", field_type="float", default=60.0, min_value=1, decimals=1),
         ),
         presets=(
             StepPreset(
@@ -706,6 +716,63 @@ STEP_DEFINITIONS = [
                     "video_url": "${upload.get('video_url')}",
                     "directory": "artifacts/uploads",
                     "filename": "upload_video.mp4",
+                    "user_agent": "Mozilla/5.0",
+                    "referer": "",
+                    "cookies": "",
+                    "headers_json": "",
+                    "timeout_seconds": 60,
+                },
+            ),
+        ),
+    ),
+    StepDefinition(
+        key="push_file_to_device",
+        label="Push File To Device",
+        description="Send a local file from the PC to the connected Android device with adb push and store it in upload.device_video_path.",
+        template={
+            "local_path": "${upload.get('local_video_path')}",
+            "device_path": "/sdcard/Movies/upload_video.mp4",
+            "create_parent": True,
+        },
+        fields=(
+            StepField("local_path", "Local Path", default="${upload.get('local_video_path')}", placeholder="D:/videos/upload_video.mp4"),
+            StepField("device_path", "Device Path", default="/sdcard/Movies/upload_video.mp4", placeholder="/sdcard/Movies/upload_video.mp4"),
+            StepField("create_parent", "Create Parent Directory", field_type="bool", default=True),
+        ),
+        presets=(
+            StepPreset(
+                "Push Current Upload Video",
+                "Push the current upload file into /sdcard/Movies on the Android device.",
+                {
+                    "local_path": "${upload.get('local_video_path')}",
+                    "device_path": "/sdcard/Movies/upload_video.mp4",
+                    "create_parent": True,
+                },
+            ),
+        ),
+    ),
+    StepDefinition(
+        key="delete_local_file",
+        label="Delete Local File",
+        description="Delete a file on the PC, usually the current upload.local_video_path after it has been pushed to the device.",
+        template={
+            "local_path": "${upload.get('local_video_path')}",
+            "missing_ok": True,
+            "clear_upload_local_video_path": True,
+        },
+        fields=(
+            StepField("local_path", "Local Path", default="${upload.get('local_video_path')}", placeholder="D:/videos/upload_video.mp4"),
+            StepField("missing_ok", "Missing OK", field_type="bool", default=True),
+            StepField("clear_upload_local_video_path", "Clear Upload Local Video Path", field_type="bool", default=True),
+        ),
+        presets=(
+            StepPreset(
+                "Delete Current Upload Video",
+                "Delete the current upload local video file after it has been used.",
+                {
+                    "local_path": "${upload.get('local_video_path')}",
+                    "missing_ok": True,
+                    "clear_upload_local_video_path": True,
                 },
             ),
         ),
@@ -1179,6 +1246,27 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
     if step_type == "download_video_asset":
         if not str(parameters.get("video_url", "")).strip():
             errors.append("Video URL is required")
+        timeout_seconds = _safe_float(parameters.get("timeout_seconds", 60), "Timeout", errors)
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            errors.append("Timeout must be greater than 0")
+        headers_json = str(parameters.get("headers_json", "") or "").strip()
+        if headers_json:
+            try:
+                parsed_headers = json.loads(headers_json)
+            except json.JSONDecodeError:
+                errors.append("Headers JSON must be valid JSON")
+            else:
+                if not isinstance(parsed_headers, dict):
+                    errors.append("Headers JSON must be a JSON object")
+
+    if step_type == "push_file_to_device":
+        if not str(parameters.get("local_path", "")).strip():
+            errors.append("Local Path is required")
+        if not str(parameters.get("device_path", "")).strip():
+            errors.append("Device Path is required")
+
+    if step_type == "delete_local_file" and not str(parameters.get("local_path", "")).strip():
+        errors.append("Local Path is required")
 
     if step_type == "press_key" and not str(parameters.get("key", "")).strip():
         errors.append("Key is required")

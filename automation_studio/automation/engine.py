@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
+import shlex
+import subprocess
 import threading
 import time
 import shutil
 from urllib.parse import urlparse
-from urllib.request import urlretrieve
+from urllib.request import Request, urlopen
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from automation_studio.automation.plugins import plugin_handler_for_step_type
@@ -218,6 +221,8 @@ class WorkflowExecutor:
             "run_for_each_account": self._run_for_each_account,
             "prepare_upload_context": self._prepare_upload_context,
             "download_video_asset": self._download_video_asset,
+            "push_file_to_device": self._push_file_to_device,
+            "delete_local_file": self._delete_local_file,
             "press_key": self._press_key,
             "input_keycode": self._input_keycode,
             "shell": self._shell,
@@ -1235,7 +1240,7 @@ class WorkflowExecutor:
 
         parsed = urlparse(source)
         if parsed.scheme in {"http", "https"}:
-            urlretrieve(source, target_path)
+            self._download_http_asset(source, target_path, parameters)
         else:
             source_path = Path(parsed.path if parsed.scheme == "file" else source)
             if not source_path.exists():
@@ -1247,6 +1252,185 @@ class WorkflowExecutor:
         self.context["upload"]["local_video_path"] = str(target_path)
         self.context["vars"]["upload_local_video_path"] = str(target_path)
         return {"artifact_path": str(target_path), "local_video_path": str(target_path)}
+
+    def _download_http_asset(self, source: str, target_path: Path, parameters: dict[str, Any]) -> None:
+        headers = {
+            "User-Agent": str(
+                parameters.get("user_agent")
+                or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            ).strip(),
+            "Accept": str(parameters.get("accept") or "*/*").strip(),
+        }
+        referer = str(parameters.get("referer") or "").strip()
+        if referer:
+            headers["Referer"] = referer
+        cookies = str(parameters.get("cookies") or "").strip()
+        if cookies:
+            headers["Cookie"] = cookies
+
+        extra_headers = parameters.get("headers_json")
+        if extra_headers:
+            try:
+                parsed_headers = json.loads(str(extra_headers))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid headers_json: {exc}") from exc
+            if not isinstance(parsed_headers, dict):
+                raise RuntimeError("headers_json must be a JSON object")
+            for key, value in parsed_headers.items():
+                key_text = str(key).strip()
+                if key_text:
+                    headers[key_text] = str(value)
+
+        timeout_seconds = float(parameters.get("timeout_seconds", 60) or 60)
+        request = Request(source, headers=headers)
+        try:
+            with urlopen(request, timeout=timeout_seconds) as response, target_path.open("wb") as target_file:
+                shutil.copyfileobj(response, target_file)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to download video asset from URL: {exc}. "
+                "If the source is protected, set Referer/Cookies/Headers JSON or use a direct downloadable URL."
+            ) from exc
+
+    def _push_file_to_device(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        local_path = str(
+            parameters.get("local_path")
+            or self.context.get("upload", {}).get("local_video_path")
+            or self.context.get("vars", {}).get("upload_local_video_path")
+            or ""
+        ).strip()
+        if not local_path:
+            raise RuntimeError("push_file_to_device requires local_path or upload.local_video_path")
+
+        device_path = str(
+            parameters.get("device_path")
+            or self.context.get("upload", {}).get("device_video_path")
+            or self.context.get("vars", {}).get("upload_device_video_path")
+            or ""
+        ).strip()
+        if not device_path:
+            raise RuntimeError("push_file_to_device requires device_path")
+
+        source_path = Path(local_path)
+        if not source_path.exists():
+            raise RuntimeError(f"Local file not found: {local_path}")
+
+        serial = str(self.device_record.get("serial") or "").strip()
+        if not serial:
+            raise RuntimeError("Device serial is required for adb push")
+
+        adb_path = self._find_adb_executable()
+        create_parent = bool(parameters.get("create_parent", True))
+        remote_parent = str(PurePosixPath(device_path).parent)
+        if create_parent and remote_parent not in {"", ".", "/"}:
+            mkdir_result = subprocess.run(
+                [adb_path, "-s", serial, "shell", "mkdir", "-p", remote_parent],
+                capture_output=True,
+                text=True,
+            )
+            if mkdir_result.returncode != 0:
+                message = (mkdir_result.stderr or mkdir_result.stdout or "").strip() or "Unknown adb mkdir error"
+                raise RuntimeError(f"Failed to prepare device directory: {message}")
+
+        push_result = subprocess.run(
+            [adb_path, "-s", serial, "push", str(source_path), device_path],
+            capture_output=True,
+            text=True,
+        )
+        if push_result.returncode != 0:
+            message = (push_result.stderr or push_result.stdout or "").strip() or "Unknown adb push error"
+            raise RuntimeError(f"Failed to push file to device: {message}")
+
+        verify_result = subprocess.run(
+            [adb_path, "-s", serial, "shell", f"ls {shlex.quote(device_path)}"],
+            capture_output=True,
+            text=True,
+        )
+        if verify_result.returncode != 0:
+            message = (verify_result.stderr or verify_result.stdout or "").strip() or "Unknown adb verify error"
+            raise RuntimeError(f"File push completed but device file was not found: {message}")
+
+        media_uri = f"file://{device_path}"
+        media_scan_result = subprocess.run(
+            [
+                adb_path,
+                "-s",
+                serial,
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                "-d",
+                media_uri,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        self.context.setdefault("upload", {})
+        self.context["upload"]["device_video_path"] = device_path
+        self.context["vars"]["upload_device_video_path"] = device_path
+        output_parts = [
+            (push_result.stdout or push_result.stderr or "").strip(),
+            (verify_result.stdout or verify_result.stderr or "").strip(),
+            (media_scan_result.stdout or media_scan_result.stderr or "").strip(),
+        ]
+        output = "\n".join(part for part in output_parts if part)
+        return {
+            "local_video_path": str(source_path),
+            "device_video_path": device_path,
+            "adb_output": output,
+        }
+
+    def _delete_local_file(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        local_path = str(
+            parameters.get("local_path")
+            or self.context.get("upload", {}).get("local_video_path")
+            or self.context.get("vars", {}).get("upload_local_video_path")
+            or ""
+        ).strip()
+        if not local_path:
+            raise RuntimeError("delete_local_file requires local_path or upload.local_video_path")
+
+        target_path = Path(local_path)
+        missing_ok = bool(parameters.get("missing_ok", True))
+        if not target_path.exists():
+            if missing_ok:
+                if bool(parameters.get("clear_upload_local_video_path", True)):
+                    self.context.setdefault("upload", {})
+                    self.context["upload"]["local_video_path"] = ""
+                    self.context["vars"]["upload_local_video_path"] = ""
+                return {"local_video_path": str(target_path), "deleted": False, "missing": True}
+            raise RuntimeError(f"Local file not found: {local_path}")
+
+        target_path.unlink()
+        if bool(parameters.get("clear_upload_local_video_path", True)):
+            self.context.setdefault("upload", {})
+            self.context["upload"]["local_video_path"] = ""
+            self.context["vars"]["upload_local_video_path"] = ""
+        return {"local_video_path": str(target_path), "deleted": True, "missing": False}
+
+    def _find_adb_executable(self) -> str:
+        direct = shutil.which("adb")
+        if direct:
+            return direct
+
+        sdk_roots = [
+            os.environ.get("ANDROID_SDK_ROOT", ""),
+            os.environ.get("ANDROID_HOME", ""),
+            str(Path.home() / "AppData" / "Local" / "Android" / "Sdk"),
+        ]
+        for sdk_root in sdk_roots:
+            sdk_root = str(sdk_root or "").strip()
+            if not sdk_root:
+                continue
+            for candidate in (Path(sdk_root) / "platform-tools" / "adb.exe", Path(sdk_root) / "platform-tools" / "adb"):
+                if candidate.exists():
+                    return str(candidate)
+
+        raise RuntimeError("adb executable not found. Install Android platform-tools or add adb to PATH.")
 
     def _filename_from_source(self, source: str) -> str:
         parsed = urlparse(source)

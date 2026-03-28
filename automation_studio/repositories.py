@@ -1266,6 +1266,18 @@ class UploadRepository:
                 (timestamp, timestamp, upload_job_id),
             )
 
+    def update_upload_local_video_path(self, upload_job_id: int, local_video_path: str) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE upload_jobs
+                SET local_video_path = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (str(local_video_path or "").strip(), timestamp, upload_job_id),
+            )
+
     def mark_upload_finished(
         self,
         upload_job_id: int,
