@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "exported_at": "2026-03-28T12:12:42",
+  "exported_at": "2026-03-28T11:57:52",
   "workflow": {
-    "name": "shopee-like",
+    "name": "tiktok-like",
     "description": "",
     "is_active": true,
     "definition_version": 2
@@ -10,7 +10,44 @@
   "steps": [
     {
       "position": 1,
-      "name": "เปลี่ยน Account",
+      "name": "Open App",
+      "step_type": "launch_app",
+      "parameters": {
+        "package": "com.ss.android.ugc.trill",
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": false,
+      "schema_version": 2
+    },
+    {
+      "position": 2,
+      "name": "รอ หน้าหลัก",
+      "step_type": "wait_for_text",
+      "parameters": {
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0,
+        "description": "หน้าหลัก",
+        "timeout": 5
+      },
+      "is_enabled": false,
+      "schema_version": 2
+    },
+    {
+      "position": 3,
+      "name": "Launch App",
       "step_type": "switch_account",
       "parameters": {
         "step_timeout_seconds": 0,
@@ -21,60 +58,18 @@
         "capture_hierarchy_on_failure": false,
         "repeat_times": 1,
         "repeat_delay_seconds": 0,
-        "platform_key": "${platform.get('key')}",
+        "platform_key": "tiktok",
         "account_name": "${account.get('display_name')}",
         "account_id": 0,
-        "launch_package_first": false
+        "launch_package_first": true
       },
       "is_enabled": false,
       "schema_version": 2
     },
     {
-      "position": 2,
-      "name": "เช็ค Live & Video",
-      "step_type": "wait_for_element",
-      "parameters": {
-        "step_timeout_seconds": 0,
-        "retry_count": 0,
-        "retry_delay_seconds": 1,
-        "continue_on_error": false,
-        "on_failure": "stop",
-        "capture_hierarchy_on_failure": false,
-        "repeat_times": 1,
-        "repeat_delay_seconds": 0,
-        "resource_id": "com.shopee.th:id/old_wrapper",
-        "timeout": 5,
-        "desired_state": "exists",
-        "poll_interval_seconds": 0.5
-      },
-      "is_enabled": true,
-      "schema_version": 2
-    },
-    {
-      "position": 3,
-      "name": "คลิก live & video",
-      "step_type": "click",
-      "parameters": {
-        "step_timeout_seconds": 0,
-        "retry_count": 0,
-        "retry_delay_seconds": 1,
-        "continue_on_error": false,
-        "on_failure": "stop",
-        "capture_hierarchy_on_failure": false,
-        "repeat_times": 1,
-        "repeat_delay_seconds": 0,
-        "resource_id": "com.shopee.th:id/old_wrapper",
-        "timeout": 5,
-        "x": 0,
-        "y": 0
-      },
-      "is_enabled": true,
-      "schema_version": 2
-    },
-    {
       "position": 4,
-      "name": "สุ่มดู clip",
-      "step_type": "random_wait",
+      "name": "เช็ก state",
+      "step_type": "branch_on_state",
       "parameters": {
         "step_timeout_seconds": 0,
         "retry_count": 0,
@@ -84,14 +79,57 @@
         "capture_hierarchy_on_failure": false,
         "repeat_times": 1,
         "repeat_delay_seconds": 0,
-        "min_seconds": 5,
-        "max_seconds": 7
+        "resource_id": "com.ss.android.ugc.trill:id/n17",
+        "timeout": 5,
+        "state_name": "selected",
+        "target_position_on_true": 6,
+        "target_position_on_false": 5
       },
       "is_enabled": true,
       "schema_version": 2
     },
     {
       "position": 5,
+      "name": "Click หน้าหลัก",
+      "step_type": "click",
+      "parameters": {
+        "description": "หน้าหลัก",
+        "timeout": 5,
+        "x": 0,
+        "y": 0,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 6,
+      "name": "รอดูคลิป",
+      "step_type": "random_wait",
+      "parameters": {
+        "min_seconds": 5,
+        "max_seconds": 7,
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 7,
       "name": "สุ่มกด like",
       "step_type": "chance_gate",
       "parameters": {
@@ -102,7 +140,7 @@
         "on_failure": "stop",
         "capture_hierarchy_on_failure": false,
         "repeat_times": 1,
-        "repeat_delay_seconds": 0.1,
+        "repeat_delay_seconds": 0,
         "probability_percent": 5,
         "skip_count_on_fail": 1,
         "target_position_on_pass": 0,
@@ -112,10 +150,14 @@
       "schema_version": 2
     },
     {
-      "position": 6,
+      "position": 8,
       "name": "กด like",
       "step_type": "click",
       "parameters": {
+        "resource_id": "com.ss.android.ugc.trill:id/fbu",
+        "timeout": 5,
+        "x": 0,
+        "y": 0,
         "step_timeout_seconds": 0,
         "retry_count": 0,
         "retry_delay_seconds": 1,
@@ -123,30 +165,18 @@
         "on_failure": "skip",
         "capture_hierarchy_on_failure": false,
         "repeat_times": 1,
-        "repeat_delay_seconds": 0,
-        "description": "like vide",
-        "timeout": 1,
-        "x": 0,
-        "y": 0
+        "repeat_delay_seconds": 0
       },
       "is_enabled": true,
       "schema_version": 2
     },
     {
-      "position": 7,
-      "name": "ปัดเลี่ยน video",
+      "position": 9,
+      "name": "เลื่อนคลิป",
       "step_type": "swipe",
       "parameters": {
-        "step_timeout_seconds": 0,
-        "retry_count": 0,
-        "retry_delay_seconds": 1,
-        "continue_on_error": false,
-        "on_failure": "stop",
-        "capture_hierarchy_on_failure": false,
-        "repeat_times": 1,
-        "repeat_delay_seconds": 0,
         "direction": "up",
-        "scale": 0.8,
+        "scale": 0.6,
         "anchor_x": 0.5,
         "anchor_y": 0.4,
         "margin_ratio": 0.1,
@@ -160,34 +190,23 @@
         "y2": 400,
         "duration": 0.2,
         "repeat": 1,
-        "pause_seconds": 0
-      },
-      "is_enabled": true,
-      "schema_version": 2
-    },
-    {
-      "position": 8,
-      "name": "วนดู video",
-      "step_type": "loop_until_elapsed",
-      "parameters": {
+        "pause_seconds": 0,
         "step_timeout_seconds": 0,
         "retry_count": 0,
         "retry_delay_seconds": 1,
         "continue_on_error": false,
-        "on_failure": "skip",
+        "on_failure": "stop",
         "capture_hierarchy_on_failure": false,
         "repeat_times": 1,
-        "repeat_delay_seconds": 0,
-        "duration_minutes": 10,
-        "target_position": 4
+        "repeat_delay_seconds": 0
       },
       "is_enabled": true,
       "schema_version": 2
     },
     {
-      "position": 9,
-      "name": "Stop App",
-      "step_type": "stop_app",
+      "position": 10,
+      "name": "วนกลับไปดูคลิป",
+      "step_type": "loop_until_elapsed",
       "parameters": {
         "step_timeout_seconds": 0,
         "retry_count": 0,
@@ -197,7 +216,26 @@
         "capture_hierarchy_on_failure": false,
         "repeat_times": 1,
         "repeat_delay_seconds": 0,
-        "package": "com.shopee.th"
+        "duration_minutes": 5,
+        "target_position": 4
+      },
+      "is_enabled": true,
+      "schema_version": 2
+    },
+    {
+      "position": 11,
+      "name": "Stop App",
+      "step_type": "stop_app",
+      "parameters": {
+        "package": "com.ss.android.ugc.trill",
+        "step_timeout_seconds": 0,
+        "retry_count": 0,
+        "retry_delay_seconds": 1,
+        "continue_on_error": false,
+        "on_failure": "stop",
+        "capture_hierarchy_on_failure": false,
+        "repeat_times": 1,
+        "repeat_delay_seconds": 0
       },
       "is_enabled": true,
       "schema_version": 2
