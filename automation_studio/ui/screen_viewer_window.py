@@ -148,6 +148,98 @@ class FrameRefreshWorker(QtCore.QRunnable):
         self.signals.finished.emit(self.tile, result)
 
 
+class WorkflowBatchRunner(QtCore.QThread):
+    progress = QtCore.Signal(object)
+    result_ready = QtCore.Signal(dict)
+
+    def __init__(
+        self,
+        workflow_service: Any,
+        workflow_id: int,
+        device_records: list[dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.workflow_service = workflow_service
+        self.workflow_id = int(workflow_id)
+        self.device_records = [dict(record) for record in device_records]
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def run(self) -> None:
+        total = len(self.device_records)
+        results: list[dict[str, Any]] = []
+        success_count = 0
+        stopped_count = 0
+        processed_count = 0
+        for index, device_record in enumerate(self.device_records, start=1):
+            if self._stop_requested:
+                break
+            device_id = int(device_record.get("id") or 0)
+            device_name = str(device_record.get("name") or device_record.get("serial") or f"Device {device_id}")
+            self.progress.emit(
+                {
+                    "phase": "started",
+                    "current": index,
+                    "total": total,
+                    "device_id": device_id,
+                    "device_name": device_name,
+                }
+            )
+            if not device_id:
+                result = {"success": False, "message": "Device is missing a database id"}
+            else:
+                try:
+                    result = self.workflow_service.execute_workflow(self.workflow_id, device_id)
+                except Exception as exc:
+                    result = {"success": False, "message": str(exc)}
+            if result.get("success"):
+                success_count += 1
+            results.append(
+                {
+                    "device_id": device_id,
+                    "device_name": device_name,
+                    "result": result,
+                }
+            )
+            processed_count += 1
+            self.progress.emit(
+                {
+                    "phase": "finished",
+                    "current": index,
+                    "total": total,
+                    "device_id": device_id,
+                    "device_name": device_name,
+                    "result": result,
+                }
+            )
+        if self._stop_requested and processed_count < total:
+            for device_record in self.device_records[processed_count:]:
+                device_id = int(device_record.get("id") or 0)
+                device_name = str(device_record.get("name") or device_record.get("serial") or f"Device {device_id}")
+                stopped_count += 1
+                results.append(
+                    {
+                        "device_id": device_id,
+                        "device_name": device_name,
+                        "result": {"success": False, "stopped": True, "message": "Stopped before execution"},
+                    }
+                )
+        self.result_ready.emit(
+            {
+                "workflow_id": self.workflow_id,
+                "total": total,
+                "success_count": success_count,
+                "failure_count": max(total - success_count - stopped_count, 0),
+                "stopped_count": stopped_count,
+                "stopped": bool(self._stop_requested),
+                "results": results,
+                "success": success_count == total and total > 0 and not self._stop_requested,
+            }
+        )
+
+
 class DeviceDetailViewerWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
@@ -536,6 +628,13 @@ class DeviceScreenTile(QtWidgets.QFrame):
         meta_row.addStretch(1)
         layout.addLayout(meta_row)
 
+        self.workflow_state_label = QtWidgets.QLabel("Idle")
+        self.workflow_state_label.setObjectName("subtitleLabel")
+        self.workflow_state_label.setStyleSheet(
+            "font-size:8.5pt; color:#6ee7b7; background:#0f1b15; border:1px solid #1f4a34; border-radius:8px; padding:2px 6px;"
+        )
+        layout.addWidget(self.workflow_state_label, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+
         self.image_card = QtWidgets.QFrame()
         self.image_card.setStyleSheet("background:transparent; border:none;")
         self.image_card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -718,6 +817,30 @@ class DeviceScreenTile(QtWidgets.QFrame):
     def set_resolution_scale(self, resolution_scale: float) -> None:
         self._resolution_scale = max(0.25, min(float(resolution_scale or 1.0), 1.0))
 
+    def set_workflow_state(self, state: str, message: str = "") -> None:
+        normalized = str(state or "").strip().lower() or "idle"
+        label_text = {
+            "idle": "Idle",
+            "queued": "Queued",
+            "running": "Running",
+            "success": "Done",
+            "failed": "Failed",
+            "stopped": "Stopped",
+        }.get(normalized, normalized.title())
+        style_map = {
+            "idle": "color:#6ee7b7; background:#0f1b15; border:1px solid #1f4a34;",
+            "queued": "color:#c4b5fd; background:#161227; border:1px solid #4c1d95;",
+            "running": "color:#7dd3fc; background:#0e1a2b; border:1px solid #1d4ed8;",
+            "success": "color:#86efac; background:#102417; border:1px solid #166534;",
+            "failed": "color:#fca5a5; background:#2a1215; border:1px solid #991b1b;",
+            "stopped": "color:#fcd34d; background:#2b2110; border:1px solid #92400e;",
+        }
+        self.workflow_state_label.setText(label_text)
+        self.workflow_state_label.setStyleSheet(
+            f"font-size:8.5pt; border-radius:8px; padding:2px 6px; {style_map.get(normalized, style_map['idle'])}"
+        )
+        self.workflow_state_label.setToolTip(message or "")
+
     def current_pixmap(self) -> QtGui.QPixmap | None:
         return self._last_pixmap
 
@@ -785,11 +908,15 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self,
         *,
         devices: list[dict[str, Any]],
+        workflows: list[dict[str, Any]] | None = None,
+        workflow_service: Any | None = None,
         refresh_interval_ms: int = 1000,
         autostart: bool = True,
     ) -> None:
         super().__init__()
         self.devices = [device for device in devices if str(device.get("serial") or "").strip()]
+        self.workflows = [dict(workflow) for workflow in (workflows or [])]
+        self.workflow_service = workflow_service
         self.refresh_interval_ms = max(int(refresh_interval_ms or 1000), 250)
         self.autostart = autostart
         self._scrcpy_program = find_scrcpy_executable()
@@ -803,6 +930,10 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self._updating_view_preset = False
         self._updating_scrcpy_preset = False
         self._refresh_in_progress = False
+        self._workflow_runner: WorkflowBatchRunner | None = None
+        self._workflow_target_device_ids: set[int] = set()
+        self._workflow_current_device_id: int | None = None
+        self._workflow_stop_requested = False
         self._pending_tiles: list[DeviceScreenTile] = []
         self._active_refresh_workers = 0
         self._refreshed_count = 0
@@ -1023,6 +1154,41 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         summary_row.addStretch(1)
         toolbar_layout.addLayout(summary_row)
 
+        workflow_row = QtWidgets.QHBoxLayout()
+        workflow_row.setSpacing(6)
+        workflow_group = QtWidgets.QFrame()
+        workflow_group.setProperty("panel", True)
+        workflow_group.setStyleSheet("QFrame { background:#0d1726; border:1px solid #1c2b40; border-radius:12px; }")
+        workflow_layout = QtWidgets.QVBoxLayout(workflow_group)
+        workflow_layout.setContentsMargins(10, 8, 10, 8)
+        workflow_layout.setSpacing(6)
+        workflow_title = QtWidgets.QLabel("Workflow Actions")
+        workflow_title.setStyleSheet("font-size:8.5pt; font-weight:700; color:#dbe7ff;")
+        workflow_layout.addWidget(workflow_title)
+        workflow_controls = QtWidgets.QHBoxLayout()
+        workflow_controls.setSpacing(6)
+        workflow_controls.addWidget(QtWidgets.QLabel("Workflow"))
+        self.workflow_combo = QtWidgets.QComboBox()
+        self.workflow_combo.setMinimumWidth(280)
+        workflow_controls.addWidget(self.workflow_combo, 1)
+        self.reload_workflows_button = QtWidgets.QPushButton("Reload")
+        self.run_selected_workflow_button = QtWidgets.QPushButton("Run Selected")
+        self.run_all_workflow_button = QtWidgets.QPushButton("Run All")
+        self.stop_workflow_button = QtWidgets.QPushButton("Stop Workflow")
+        for button in (
+            self.reload_workflows_button,
+            self.run_selected_workflow_button,
+            self.run_all_workflow_button,
+            self.stop_workflow_button,
+        ):
+            button.setMinimumHeight(24)
+            button.setStyleSheet("padding:4px 8px; font-size:8.5pt;")
+            workflow_controls.addWidget(button)
+        workflow_controls.addStretch(1)
+        workflow_layout.addLayout(workflow_controls)
+        workflow_row.addWidget(workflow_group, 1)
+        toolbar_layout.addLayout(workflow_row)
+
         batch_row = QtWidgets.QHBoxLayout()
         batch_row.setSpacing(6)
         self.select_all_button = QtWidgets.QPushButton("Select All")
@@ -1072,6 +1238,11 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self.scrcpy_max_size_combo.currentIndexChanged.connect(self._update_scrcpy_max_size)
         self.scrcpy_max_fps_combo.currentIndexChanged.connect(self._update_scrcpy_max_fps)
         self.scrcpy_bit_rate_combo.currentIndexChanged.connect(self._update_scrcpy_bit_rate)
+        self.reload_workflows_button.clicked.connect(self._reload_workflows)
+        self.run_selected_workflow_button.clicked.connect(self.run_selected_workflow)
+        self.run_all_workflow_button.clicked.connect(self.run_all_workflow)
+        self.stop_workflow_button.clicked.connect(self.stop_workflow_run)
+        self.workflow_combo.currentIndexChanged.connect(self._update_workflow_actions)
         self.select_all_button.clicked.connect(self._select_all_tiles)
         self.clear_selection_button.clicked.connect(self._clear_selected_tiles)
         self.refresh_selected_button.clicked.connect(self.refresh_selected_tiles)
@@ -1084,6 +1255,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self.zoom_in_button.clicked.connect(self._step_zoom_in)
         self._sync_view_preset_from_controls()
         self._sync_scrcpy_preset_from_controls()
+        self._populate_workflows()
         self._update_scrcpy_controls()
         self._update_selection_actions()
 
@@ -1171,6 +1343,172 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         ):
             button.setEnabled(has_selection)
         self.select_all_button.setEnabled(bool(self._tiles) and selected_count < len(self._tiles))
+        self._update_workflow_actions()
+
+    def _selected_device_records(self) -> list[dict[str, Any]]:
+        return [dict(tile.device_record) for tile in self._selected_tiles()]
+
+    def _tile_for_device_id(self, device_id: int) -> DeviceScreenTile | None:
+        for tile in self._tiles:
+            if int(tile.device_record.get("id") or 0) == int(device_id or 0):
+                return tile
+        return None
+
+    def _populate_workflows(self) -> None:
+        self.workflow_combo.clear()
+        self.workflow_combo.addItem("Select workflow...", None)
+        for workflow in sorted(self.workflows, key=lambda item: (str(item.get("name") or "").lower(), int(item.get("id") or 0))):
+            self.workflow_combo.addItem(str(workflow.get("name") or f"Workflow {workflow.get('id')}"), int(workflow["id"]))
+        self._restore_workflow_selection()
+        self._update_workflow_actions()
+
+    def _restore_workflow_selection(self) -> None:
+        saved_workflow_id = int(_settings().value("wall/workflow_id", 0) or 0)
+        if saved_workflow_id:
+            index = self.workflow_combo.findData(saved_workflow_id)
+            if index >= 0:
+                self.workflow_combo.setCurrentIndex(index)
+
+    def _reload_workflows(self) -> None:
+        if self.workflow_service is None:
+            self.status_label.setText("Status: workflow service unavailable")
+            return
+        try:
+            self.workflows = self.workflow_service.list_workflows()
+        except Exception as exc:
+            self.status_label.setText(f"Status: failed to reload workflows ({exc})")
+            return
+        self._populate_workflows()
+        self.status_label.setText(f"Status: loaded {len(self.workflows)} workflows")
+
+    def _selected_workflow_id(self) -> int | None:
+        value = self.workflow_combo.currentData()
+        return int(value) if isinstance(value, int) and value > 0 else None
+
+    def _update_workflow_actions(self) -> None:
+        workflow_id = self._selected_workflow_id()
+        workflow_ready = workflow_id is not None and self.workflow_service is not None and self._workflow_runner is None
+        self.reload_workflows_button.setEnabled(self.workflow_service is not None and self._workflow_runner is None)
+        self.run_all_workflow_button.setEnabled(workflow_ready and bool(self.devices))
+        self.run_selected_workflow_button.setEnabled(workflow_ready and bool(self._selected_tiles()))
+        self.stop_workflow_button.setEnabled(self._workflow_runner is not None)
+
+    def _start_workflow_runner(self, workflow_id: int, device_records: list[dict[str, Any]], label: str) -> None:
+        if self._workflow_runner is not None:
+            self.status_label.setText("Status: workflow run already in progress")
+            return
+        workflow_name = self.workflow_combo.currentText().strip()
+        self._workflow_target_device_ids = {int(record.get("id") or 0) for record in device_records if int(record.get("id") or 0) > 0}
+        self._workflow_current_device_id = None
+        self._workflow_stop_requested = False
+        for device_record in device_records:
+            tile = self._tile_for_device_id(int(device_record.get("id") or 0))
+            if tile is not None:
+                tile.set_workflow_state("queued", workflow_name)
+        self._workflow_runner = WorkflowBatchRunner(self.workflow_service, workflow_id, device_records)
+        self._workflow_runner.progress.connect(self._on_workflow_progress)
+        self._workflow_runner.result_ready.connect(self._on_workflow_result)
+        self._workflow_runner.finished.connect(self._on_workflow_runner_finished)
+        self.status_label.setText(label)
+        self._update_workflow_actions()
+        self._workflow_runner.start()
+
+    def stop_workflow_run(self) -> None:
+        if self._workflow_runner is None:
+            self.status_label.setText("Status: no workflow is running")
+            return
+        if self._workflow_stop_requested:
+            self.status_label.setText("Status: stop already requested")
+            return
+        self._workflow_stop_requested = True
+        self._workflow_runner.request_stop()
+        for device_id in self._workflow_target_device_ids:
+            if device_id == self._workflow_current_device_id:
+                continue
+            tile = self._tile_for_device_id(device_id)
+            if tile is not None:
+                tile.set_workflow_state("stopped", "Stopped before execution")
+        self.status_label.setText("Status: stopping workflow after current device")
+        self._update_workflow_actions()
+
+    def run_selected_workflow(self) -> None:
+        workflow_id = self._selected_workflow_id()
+        if workflow_id is None:
+            self.status_label.setText("Status: select a workflow first")
+            return
+        device_records = self._selected_device_records()
+        if not device_records:
+            self.status_label.setText("Status: no selected devices")
+            return
+        self._start_workflow_runner(
+            workflow_id,
+            device_records,
+            f"Status: running workflow on {len(device_records)} selected devices",
+        )
+
+    def run_all_workflow(self) -> None:
+        workflow_id = self._selected_workflow_id()
+        if workflow_id is None:
+            self.status_label.setText("Status: select a workflow first")
+            return
+        if not self.devices:
+            self.status_label.setText("Status: no devices available")
+            return
+        self._start_workflow_runner(
+            workflow_id,
+            self.devices,
+            f"Status: running workflow on all {len(self.devices)} devices",
+        )
+
+    def _on_workflow_progress(self, payload: dict[str, Any]) -> None:
+        current = int(payload.get("current") or 0)
+        total = int(payload.get("total") or 0)
+        device_name = str(payload.get("device_name") or "device")
+        device_id = int(payload.get("device_id") or 0)
+        tile = self._tile_for_device_id(device_id)
+        if str(payload.get("phase") or "") == "started":
+            self._workflow_current_device_id = device_id
+            if tile is not None:
+                tile.set_workflow_state("running", device_name)
+            self.status_label.setText(f"Status: workflow running {current}/{total} on {device_name}")
+            return
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        if tile is not None:
+            tile.set_workflow_state(
+                "stopped" if result.get("stopped") else ("success" if result.get("success") else "failed"),
+                str(result.get("message") or ""),
+            )
+        if self._workflow_current_device_id == device_id:
+            self._workflow_current_device_id = None
+        self.status_label.setText(f"Status: workflow completed {current}/{total} on {device_name}")
+
+    def _on_workflow_result(self, result: dict[str, Any]) -> None:
+        for item in result.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            tile = self._tile_for_device_id(int(item.get("device_id") or 0))
+            run_result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            if tile is not None:
+                tile.set_workflow_state(
+                    "stopped" if run_result.get("stopped") else ("success" if run_result.get("success") else "failed"),
+                    str(run_result.get("message") or ""),
+                )
+        success_count = int(result.get("success_count") or 0)
+        total = int(result.get("total") or 0)
+        stopped_count = int(result.get("stopped_count") or 0)
+        if bool(result.get("stopped")):
+            self.status_label.setText(
+                f"Status: workflow stopped ({success_count} done, {stopped_count} stopped, {total} total)"
+            )
+            return
+        self.status_label.setText(f"Status: workflow finished {success_count}/{total} devices")
+
+    def _on_workflow_runner_finished(self) -> None:
+        self._workflow_runner = None
+        self._workflow_target_device_ids.clear()
+        self._workflow_current_device_id = None
+        self._workflow_stop_requested = False
+        self._update_workflow_actions()
 
     def _select_all_tiles(self) -> None:
         for tile in self._tiles:
@@ -1550,6 +1888,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         settings.setValue("wall/refresh_interval_ms", self.refresh_rate_combo.currentData())
         settings.setValue("wall/resolution_scale", self.resolution_combo.currentData())
         settings.setValue("wall/zoom_factor", self.zoom_combo.currentData())
+        settings.setValue("wall/workflow_id", self.workflow_combo.currentData() or 0)
         settings.setValue("wall/scrcpy_preset", self.scrcpy_preset_combo.currentData())
         settings.setValue("wall/scrcpy_max_size", self.scrcpy_max_size_combo.currentData())
         settings.setValue("wall/scrcpy_max_fps", self.scrcpy_max_fps_combo.currentData())
@@ -1563,6 +1902,11 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._save_screen_wall_settings()
         self.timer.stop()
+        if self._workflow_runner is not None:
+            self._workflow_runner.request_stop()
+            wait_fn = getattr(self._workflow_runner, "wait", None)
+            if callable(wait_fn):
+                wait_fn(1500)
         self._thread_pool.waitForDone(2000)
         for viewer in list(self._detail_windows.values()):
             viewer.close()

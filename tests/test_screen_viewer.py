@@ -11,6 +11,7 @@ from automation_studio.ui.screen_viewer_window import (
     DeviceDetailViewerWindow,
     DeviceScreenTile,
     ScreenViewerWindow,
+    WorkflowBatchRunner,
     _settings,
     find_scrcpy_executable,
 )
@@ -32,6 +33,19 @@ class ScreenViewerTests(unittest.TestCase):
         settings = _settings()
         settings.remove("wall")
         settings.sync()
+
+    def _workflow_service_stub(self, workflows: list[dict]) -> object:
+        class _Service:
+            def __init__(self, items: list[dict]) -> None:
+                self._items = [dict(item) for item in items]
+
+            def list_workflows(self) -> list[dict]:
+                return [dict(item) for item in self._items]
+
+            def execute_workflow(self, workflow_id: int, device_id: int) -> dict:
+                return {"success": True, "message": f"Workflow {workflow_id} on {device_id}"}
+
+        return _Service(workflows)
 
     def test_viewer_parser_accepts_db_path(self) -> None:
         args = build_parser().parse_args(["--db-path", "automation_studio.db", "--refresh-ms", "500"])
@@ -58,7 +72,23 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertEqual(window.pause_button.text(), "Pause")
         self.assertEqual(len(window._tiles), 2)
         self.assertEqual(window.selection_count_chip.text(), "0 selected")
+        self.assertEqual(window.workflow_combo.count(), 1)
+        self.assertFalse(window.stop_workflow_button.isEnabled())
         self.assertFalse(window.timer.isActive())
+        window.close()
+
+    def test_screen_viewer_populates_workflow_combo(self) -> None:
+        workflows = [{"id": 7, "name": "Demo Workflow"}, {"id": 3, "name": "Alpha Workflow"}]
+        service = self._workflow_service_stub(workflows)
+        window = ScreenViewerWindow(
+            devices=[{"id": 1, "name": "Phone A", "serial": "SERIAL1"}],
+            workflows=workflows,
+            workflow_service=service,
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        self.assertEqual(window.workflow_combo.count(), 3)
+        self.assertEqual(window.workflow_combo.itemText(1), "Alpha Workflow")
         window.close()
 
     def test_tile_can_save_current_frame(self) -> None:
@@ -76,6 +106,15 @@ class ScreenViewerTests(unittest.TestCase):
         tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
         tile.set_resolution_scale(0.5)
         self.assertAlmostEqual(tile._resolution_scale, 0.5)
+        tile.deleteLater()
+
+    def test_tile_workflow_state_updates_label(self) -> None:
+        tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
+        tile.set_workflow_state("running", "Workflow is running")
+        self.assertEqual(tile.workflow_state_label.text(), "Running")
+        self.assertIn("Workflow is running", tile.workflow_state_label.toolTip())
+        tile.set_workflow_state("stopped", "Workflow stopped")
+        self.assertEqual(tile.workflow_state_label.text(), "Stopped")
         tile.deleteLater()
 
     def test_tile_size_label_uses_display_size_after_resolution_scaling(self) -> None:
@@ -265,6 +304,133 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertEqual(window.scrcpy_max_fps_combo.currentData(), 30)
         self.assertEqual(window.scrcpy_bit_rate_combo.currentData(), "8M")
         window.close()
+
+    def test_run_selected_workflow_uses_only_selected_devices(self) -> None:
+        workflows = [{"id": 11, "name": "Demo Workflow"}]
+        service = self._workflow_service_stub(workflows)
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            workflows=workflows,
+            workflow_service=service,
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[tuple[int, list[int], str]] = []
+        window._start_workflow_runner = lambda workflow_id, device_records, label: captured.append(  # type: ignore[method-assign]
+            (workflow_id, [int(item["id"]) for item in device_records], label)
+        )
+        window.workflow_combo.setCurrentIndex(window.workflow_combo.findData(11))
+        window._tiles[0].set_selected(True)
+        window.run_selected_workflow()
+        self.assertEqual(captured, [(11, [1], "Status: running workflow on 1 selected devices")])
+        window.close()
+
+    def test_run_all_workflow_uses_all_devices(self) -> None:
+        workflows = [{"id": 11, "name": "Demo Workflow"}]
+        service = self._workflow_service_stub(workflows)
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            workflows=workflows,
+            workflow_service=service,
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[tuple[int, list[int], str]] = []
+        window._start_workflow_runner = lambda workflow_id, device_records, label: captured.append(  # type: ignore[method-assign]
+            (workflow_id, [int(item["id"]) for item in device_records], label)
+        )
+        window.workflow_combo.setCurrentIndex(window.workflow_combo.findData(11))
+        window.run_all_workflow()
+        self.assertEqual(captured, [(11, [1, 2], "Status: running workflow on all 2 devices")])
+        window.close()
+
+    def test_workflow_progress_updates_tile_state(self) -> None:
+        workflows = [{"id": 11, "name": "Demo Workflow"}]
+        service = self._workflow_service_stub(workflows)
+        window = ScreenViewerWindow(
+            devices=[{"id": 1, "name": "Phone A", "serial": "SERIAL1"}],
+            workflows=workflows,
+            workflow_service=service,
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        tile = window._tiles[0]
+        window._on_workflow_progress({"phase": "started", "current": 1, "total": 1, "device_id": 1, "device_name": "Phone A"})
+        self.assertEqual(tile.workflow_state_label.text(), "Running")
+        window._on_workflow_result(
+            {
+                "success_count": 1,
+                "total": 1,
+                "results": [
+                    {
+                        "device_id": 1,
+                        "result": {"success": True, "message": "ok"},
+                    }
+                ],
+            }
+        )
+        self.assertEqual(tile.workflow_state_label.text(), "Done")
+        self.assertIn("ok", tile.workflow_state_label.toolTip())
+        window.close()
+
+    def test_stop_workflow_marks_queued_tiles_and_requests_runner_stop(self) -> None:
+        workflows = [{"id": 11, "name": "Demo Workflow"}]
+        service = self._workflow_service_stub(workflows)
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            workflows=workflows,
+            workflow_service=service,
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def request_stop(self) -> None:
+                self.stopped = True
+
+        runner = _Runner()
+        window._workflow_runner = runner  # type: ignore[assignment]
+        window._workflow_target_device_ids = {1, 2}
+        window._workflow_current_device_id = 1
+        window._tiles[0].set_workflow_state("running", "Phone A")
+        window._tiles[1].set_workflow_state("queued", "Demo Workflow")
+        window.stop_workflow_run()
+        self.assertTrue(runner.stopped)
+        self.assertEqual(window._tiles[0].workflow_state_label.text(), "Running")
+        self.assertEqual(window._tiles[1].workflow_state_label.text(), "Stopped")
+        self.assertIn("stopping workflow", window.status_label.text().lower())
+        window.close()
+
+    def test_workflow_batch_runner_reports_stopped_devices(self) -> None:
+        service = self._workflow_service_stub([{"id": 11, "name": "Demo Workflow"}])
+        runner = WorkflowBatchRunner(
+            service,
+            11,
+            [
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+        )
+        captured: list[dict] = []
+        runner.result_ready.connect(captured.append)
+        runner.request_stop()
+        runner.run()
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0]["stopped"])
+        self.assertEqual(captured[0]["stopped_count"], 2)
+        self.assertEqual(captured[0]["results"][0]["result"]["message"], "Stopped before execution")
 
     def test_screen_viewer_can_select_all_tiles(self) -> None:
         window = ScreenViewerWindow(
