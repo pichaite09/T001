@@ -5,6 +5,7 @@ import json
 import random
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from automation_studio.repositories import (
     ScheduleRepository,
     ScheduleRunRepository,
     TelemetryRepository,
+    UploadRepository,
     WatcherRepository,
     WatcherTelemetryRepository,
     WorkflowRepository,
@@ -852,6 +854,456 @@ class AccountService:
         return None
 
 
+class UploadService:
+    def __init__(
+        self,
+        upload_repository: UploadRepository,
+        device_repository: DeviceRepository,
+        workflow_repository: WorkflowRepository,
+        account_service: AccountService,
+        workflow_service: WorkflowService | None = None,
+    ) -> None:
+        self.upload_repository = upload_repository
+        self.device_repository = device_repository
+        self.workflow_repository = workflow_repository
+        self.account_service = account_service
+        self.workflow_service = workflow_service
+
+    def bind_workflow_service(self, workflow_service: WorkflowService) -> None:
+        self.workflow_service = workflow_service
+
+    def list_upload_jobs(self) -> list[dict[str, Any]]:
+        return self.upload_repository.list_upload_jobs()
+
+    def get_upload_job(self, upload_job_id: int) -> dict[str, Any] | None:
+        return self.upload_repository.get_upload_job(upload_job_id)
+
+    def list_upload_templates(self) -> list[dict[str, Any]]:
+        return self.upload_repository.list_upload_templates()
+
+    def get_upload_template(self, template_id: int) -> dict[str, Any] | None:
+        return self.upload_repository.get_upload_template(template_id)
+
+    def save_upload_job(
+        self,
+        upload_job_id: int | None,
+        *,
+        device_id: int,
+        device_platform_id: int | None,
+        account_id: int | None,
+        workflow_id: int,
+        code_product: str,
+        link_product: str,
+        title: str,
+        description: str,
+        tags_text: str,
+        video_url: str,
+        cover_url: str = "",
+        local_video_path: str = "",
+        metadata_text: str = "",
+    ) -> int:
+        if not self.device_repository.get_device(int(device_id)):
+            raise ValueError("Device not found")
+        if not self.workflow_repository.get_workflow(int(workflow_id)):
+            raise ValueError("Workflow not found")
+
+        normalized_platform_id = int(device_platform_id) if device_platform_id else None
+        normalized_account_id = int(account_id) if account_id else None
+        if normalized_platform_id:
+            platform = self.account_service.get_device_platform(normalized_platform_id)
+            if not platform or int(platform["device_id"]) != int(device_id):
+                raise ValueError("Platform does not belong to the selected device")
+        elif normalized_account_id:
+            raise ValueError("Select a platform before choosing an account")
+
+        if normalized_account_id:
+            account = self.account_service.get_account(normalized_account_id)
+            if not account or int(account["device_platform_id"]) != int(normalized_platform_id or 0):
+                raise ValueError("Account does not belong to the selected platform")
+
+        normalized_title = str(title or "").strip()
+        normalized_video_url = str(video_url or "").strip()
+        normalized_local_video_path = str(local_video_path or "").strip()
+        if not normalized_title:
+            raise ValueError("Title is required")
+        if not normalized_video_url and not normalized_local_video_path:
+            raise ValueError("Video URL or Local Video Path is required")
+
+        tags = self._parse_tags_text(tags_text)
+        metadata_json = self._normalize_metadata_text(metadata_text)
+        return self.upload_repository.upsert_upload_job(
+            upload_job_id,
+            device_id=int(device_id),
+            device_platform_id=normalized_platform_id,
+            account_id=normalized_account_id,
+            workflow_id=int(workflow_id),
+            code_product=str(code_product or "").strip(),
+            link_product=str(link_product or "").strip(),
+            title=normalized_title,
+            description=str(description or "").strip(),
+            tags_json=json.dumps(tags, ensure_ascii=False),
+            video_url=normalized_video_url,
+            cover_url=str(cover_url or "").strip(),
+            local_video_path=normalized_local_video_path,
+            metadata_json=metadata_json,
+            status="draft",
+        )
+
+    def save_upload_template(
+        self,
+        template_id: int | None,
+        *,
+        name: str,
+        description: str,
+        device_id: int | None,
+        device_platform_id: int | None,
+        account_id: int | None,
+        workflow_id: int | None,
+        code_product: str,
+        link_product: str,
+        title: str,
+        upload_description: str,
+        tags_text: str,
+        video_url: str,
+        cover_url: str = "",
+        local_video_path: str = "",
+        metadata_text: str = "",
+    ) -> int:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("Template name is required")
+
+        normalized_device_id = int(device_id) if device_id else None
+        normalized_platform_id = int(device_platform_id) if device_platform_id else None
+        normalized_account_id = int(account_id) if account_id else None
+        normalized_workflow_id = int(workflow_id) if workflow_id else None
+
+        if normalized_device_id and not self.device_repository.get_device(normalized_device_id):
+            raise ValueError("Template device not found")
+        if normalized_workflow_id and not self.workflow_repository.get_workflow(normalized_workflow_id):
+            raise ValueError("Template workflow not found")
+        if normalized_platform_id:
+            platform = self.account_service.get_device_platform(normalized_platform_id)
+            if not platform or int(platform["device_id"]) != int(normalized_device_id or 0):
+                raise ValueError("Template platform does not belong to the selected device")
+        elif normalized_account_id:
+            raise ValueError("Select a platform before choosing an account")
+        if normalized_account_id:
+            account = self.account_service.get_account(normalized_account_id)
+            if not account or int(account["device_platform_id"]) != int(normalized_platform_id or 0):
+                raise ValueError("Template account does not belong to the selected platform")
+
+        tags = self._parse_tags_text(tags_text)
+        metadata_json = self._normalize_metadata_text(metadata_text)
+        return self.upload_repository.upsert_upload_template(
+            template_id,
+            name=normalized_name,
+            description=str(description or "").strip(),
+            device_id=normalized_device_id,
+            device_platform_id=normalized_platform_id,
+            account_id=normalized_account_id,
+            workflow_id=normalized_workflow_id,
+            code_product=str(code_product or "").strip(),
+            link_product=str(link_product or "").strip(),
+            title=str(title or "").strip(),
+            description_template=str(upload_description or "").strip(),
+            tags_json=json.dumps(tags, ensure_ascii=False),
+            video_url=str(video_url or "").strip(),
+            cover_url=str(cover_url or "").strip(),
+            local_video_path=str(local_video_path or "").strip(),
+            metadata_json=metadata_json,
+            is_active=True,
+        )
+
+    def delete_upload_template(self, template_id: int) -> None:
+        self.upload_repository.delete_upload_template(template_id)
+
+    def delete_upload_job(self, upload_job_id: int) -> None:
+        self.upload_repository.delete_upload_job(upload_job_id)
+
+    def execute_upload_job(self, upload_job_id: int) -> dict[str, Any]:
+        if not self.workflow_service:
+            raise RuntimeError("Workflow service is not available")
+        upload_job = self.upload_repository.get_upload_job(upload_job_id)
+        if not upload_job:
+            return {"success": False, "message": "Upload job not found"}
+
+        self.upload_repository.mark_upload_started(upload_job_id)
+        upload_context = self._build_upload_context(upload_job)
+        self.workflow_service.log_service.add(
+            int(upload_job["workflow_id"]),
+            int(upload_job["device_id"]),
+            "INFO",
+            "upload_started",
+            f"Started upload job #{upload_job_id}",
+            {
+                "upload_job_id": upload_context["id"],
+                "upload_code_product": upload_context["code_product"],
+                "upload_title": upload_context["title"],
+                "upload_video_url": upload_context["video_url"],
+            },
+        )
+        extra_context = {
+            "upload": upload_context,
+            "vars": {
+                "upload_job_id": upload_context["id"],
+                "upload_code_product": upload_context["code_product"],
+                "upload_link_product": upload_context["link_product"],
+                "upload_title": upload_context["title"],
+                "upload_description": upload_context["description"],
+                "upload_tags": upload_context["tags"],
+                "upload_video_url": upload_context["video_url"],
+                "upload_cover_url": upload_context["cover_url"],
+                "upload_local_video_path": upload_context["local_video_path"],
+                "upload_metadata": upload_context["metadata"],
+            },
+        }
+        extra_metadata = {
+            "upload_job_id": upload_context["id"],
+            "upload_code_product": upload_context["code_product"],
+            "upload_title": upload_context["title"],
+            "upload_video_url": upload_context["video_url"],
+            "upload_local_video_path": upload_context["local_video_path"],
+        }
+        result = self.workflow_service.execute_workflow(
+            int(upload_job["workflow_id"]),
+            int(upload_job["device_id"]),
+            device_platform_id=int(upload_job.get("device_platform_id") or 0) or None,
+            account_id=int(upload_job.get("account_id") or 0) or None,
+            extra_context=extra_context,
+            extra_metadata=extra_metadata,
+        )
+        final_status = "success" if bool(result.get("success")) else "failed"
+        self.upload_repository.mark_upload_finished(
+            upload_job_id,
+            status=final_status,
+            last_error="" if result.get("success") else str(result.get("message") or ""),
+            result_json=json.dumps(result, ensure_ascii=False),
+        )
+        self.workflow_service.log_service.add(
+            int(upload_job["workflow_id"]),
+            int(upload_job["device_id"]),
+            "INFO" if result.get("success") else "ERROR",
+            "upload_success" if result.get("success") else "upload_failed",
+            (
+                f"Upload job #{upload_job_id} completed"
+                if result.get("success")
+                else f"Upload job #{upload_job_id} failed: {result.get('message') or '-'}"
+            ),
+            {
+                "upload_job_id": upload_context["id"],
+                "upload_code_product": upload_context["code_product"],
+                "upload_title": upload_context["title"],
+                "upload_video_url": upload_context["video_url"],
+                "result": result,
+            },
+        )
+        return result
+
+    def execute_upload_jobs(
+        self,
+        upload_job_ids: list[int],
+        *,
+        continue_on_error: bool = True,
+    ) -> dict[str, Any]:
+        ordered_ids = [int(upload_job_id) for upload_job_id in upload_job_ids if int(upload_job_id) > 0]
+        results: list[dict[str, Any]] = []
+        success_count = 0
+        failure_count = 0
+        stopped = False
+        for upload_job_id in ordered_ids:
+            result = self.execute_upload_job(upload_job_id)
+            results.append({"upload_job_id": upload_job_id, "result": result})
+            if result.get("success"):
+                success_count += 1
+            else:
+                failure_count += 1
+                if not continue_on_error:
+                    stopped = True
+                    break
+        return {
+            "success": failure_count == 0,
+            "total": len(ordered_ids),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "stopped": stopped,
+            "continue_on_error": continue_on_error,
+            "results": results,
+        }
+
+    def export_upload_jobs(self, upload_job_ids: list[int] | None = None) -> dict[str, Any]:
+        selected_ids = {int(upload_job_id) for upload_job_id in (upload_job_ids or []) if int(upload_job_id) > 0}
+        jobs = self.list_upload_jobs()
+        if selected_ids:
+            jobs = [job for job in jobs if int(job["id"]) in selected_ids]
+        return {
+            "schema_version": 1,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "jobs": [self._export_job_payload(job) for job in jobs],
+        }
+
+    def import_upload_jobs(self, payload: dict[str, Any]) -> list[int]:
+        jobs_payload = payload.get("jobs")
+        if not isinstance(jobs_payload, list) or not jobs_payload:
+            raise ValueError("Upload import must contain a non-empty jobs list")
+        imported_ids: list[int] = []
+        for index, item in enumerate(jobs_payload, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"Imported upload job #{index} must be an object")
+            imported_ids.append(
+                self.save_upload_job(
+                    None,
+                    device_id=int(item.get("device_id") or 0),
+                    device_platform_id=int(item.get("device_platform_id") or 0) or None,
+                    account_id=int(item.get("account_id") or 0) or None,
+                    workflow_id=int(item.get("workflow_id") or 0),
+                    code_product=str(item.get("code_product") or ""),
+                    link_product=str(item.get("link_product") or ""),
+                    title=str(item.get("title") or ""),
+                    description=str(item.get("description") or ""),
+                    tags_text=self.tags_to_text(json.dumps(item.get("tags") or [], ensure_ascii=False)),
+                    video_url=str(item.get("video_url") or ""),
+                    cover_url=str(item.get("cover_url") or ""),
+                    local_video_path=str(item.get("local_video_path") or ""),
+                    metadata_text=json.dumps(item.get("metadata") or {}, ensure_ascii=False),
+                )
+            )
+        return imported_ids
+
+    def upload_summary(self) -> dict[str, Any]:
+        jobs = self.list_upload_jobs()
+        templates = self.list_upload_templates()
+        status_counter = Counter(str(job.get("status") or "draft") for job in jobs)
+        workflow_counter = Counter(
+            str(job.get("workflow_name") or "")
+            for job in jobs
+            if str(job.get("workflow_name") or "").strip()
+        )
+        platform_counter = Counter(
+            str(job.get("platform_name") or job.get("platform_key") or "")
+            for job in jobs
+            if str(job.get("platform_name") or job.get("platform_key") or "").strip()
+        )
+        account_counter = Counter(
+            str(job.get("account_name") or "")
+            for job in jobs
+            if str(job.get("account_name") or "").strip()
+        )
+        return {
+            "total_jobs": len(jobs),
+            "draft_count": status_counter.get("draft", 0),
+            "running_count": status_counter.get("running", 0),
+            "success_count": status_counter.get("success", 0),
+            "failed_count": status_counter.get("failed", 0),
+            "template_count": len(templates),
+            "top_workflow": workflow_counter.most_common(1)[0][0] if workflow_counter else "-",
+            "top_platform": platform_counter.most_common(1)[0][0] if platform_counter else "-",
+            "top_account": account_counter.most_common(1)[0][0] if account_counter else "-",
+        }
+
+    def _parse_tags_text(self, tags_text: str | None) -> list[str]:
+        parts = re.split(r"[\r\n,;#]+", str(tags_text or ""))
+        tags: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            normalized = str(part or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            tags.append(normalized)
+        return tags
+
+    def tags_to_text(self, tags_json: str | None) -> str:
+        try:
+            parsed = json.loads(tags_json or "[]")
+        except Exception:
+            parsed = []
+        if isinstance(parsed, list):
+            return ", ".join(str(item).strip() for item in parsed if str(item).strip())
+        return ""
+
+    def metadata_to_text(self, metadata_json: str | None) -> str:
+        try:
+            parsed = json.loads(metadata_json or "{}")
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, indent=2, ensure_ascii=False)
+        return "{}"
+
+    def _normalize_metadata_text(self, metadata_text: str | None) -> str:
+        text = str(metadata_text or "").strip()
+        if not text:
+            return "{}"
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:
+            raise ValueError(f"Metadata must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Metadata JSON must be an object")
+        return json.dumps(parsed, ensure_ascii=False)
+
+    def _build_upload_context(self, upload_job: dict[str, Any]) -> dict[str, Any]:
+        try:
+            tags = json.loads(upload_job.get("tags_json") or "[]")
+        except Exception:
+            tags = []
+        if not isinstance(tags, list):
+            tags = []
+        try:
+            metadata = json.loads(upload_job.get("metadata_json") or "{}")
+        except Exception:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return {
+            "id": int(upload_job["id"]),
+            "device_id": int(upload_job["device_id"]),
+            "device_platform_id": int(upload_job.get("device_platform_id") or 0) or None,
+            "account_id": int(upload_job.get("account_id") or 0) or None,
+            "workflow_id": int(upload_job["workflow_id"]),
+            "code_product": str(upload_job.get("code_product") or ""),
+            "link_product": str(upload_job.get("link_product") or ""),
+            "title": str(upload_job.get("title") or ""),
+            "description": str(upload_job.get("description") or ""),
+            "tags": [str(item) for item in tags],
+            "video_url": str(upload_job.get("video_url") or ""),
+            "cover_url": str(upload_job.get("cover_url") or ""),
+            "local_video_path": str(upload_job.get("local_video_path") or ""),
+            "metadata": metadata,
+            "status": str(upload_job.get("status") or "draft"),
+        }
+
+    def _export_job_payload(self, upload_job: dict[str, Any]) -> dict[str, Any]:
+        try:
+            tags = json.loads(upload_job.get("tags_json") or "[]")
+        except Exception:
+            tags = []
+        if not isinstance(tags, list):
+            tags = []
+        try:
+            metadata = json.loads(upload_job.get("metadata_json") or "{}")
+        except Exception:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return {
+            "device_id": int(upload_job["device_id"]),
+            "device_platform_id": int(upload_job.get("device_platform_id") or 0) or None,
+            "account_id": int(upload_job.get("account_id") or 0) or None,
+            "workflow_id": int(upload_job["workflow_id"]),
+            "code_product": str(upload_job.get("code_product") or ""),
+            "link_product": str(upload_job.get("link_product") or ""),
+            "title": str(upload_job.get("title") or ""),
+            "description": str(upload_job.get("description") or ""),
+            "tags": [str(item) for item in tags],
+            "video_url": str(upload_job.get("video_url") or ""),
+            "cover_url": str(upload_job.get("cover_url") or ""),
+            "local_video_path": str(upload_job.get("local_video_path") or ""),
+            "metadata": metadata,
+        }
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -863,6 +1315,7 @@ class WorkflowService:
         watcher_service: WatcherService,
         watcher_telemetry_service: WatcherTelemetryService,
         account_service: AccountService | None = None,
+        upload_service: UploadService | None = None,
     ) -> None:
         self.workflow_repository = workflow_repository
         self.device_repository = device_repository
@@ -872,6 +1325,10 @@ class WorkflowService:
         self.watcher_service = watcher_service
         self.watcher_telemetry_service = watcher_telemetry_service
         self.account_service = account_service
+        self.upload_service = upload_service
+
+    def bind_upload_service(self, upload_service: UploadService) -> None:
+        self.upload_service = upload_service
 
     def list_workflows(self) -> list[dict[str, Any]]:
         return self.workflow_repository.list_workflows()
@@ -1000,6 +1457,7 @@ class WorkflowService:
             watcher_telemetry_service=self.watcher_telemetry_service,
             switch_account_handler=self._execute_switch_account_step,
             run_for_each_account_handler=self._execute_run_for_each_account_step,
+            prepare_upload_context_handler=self._execute_prepare_upload_context_step,
             shared_context=shared_context,
         )
 
@@ -1013,6 +1471,8 @@ class WorkflowService:
             executor.context["platform"] = shared_context["platform"]
         if "account" in shared_context:
             executor.context["account"] = shared_context["account"]
+        if "upload" in shared_context:
+            executor.context["upload"] = shared_context["upload"]
 
     def _run_nested_workflow(
         self,
@@ -1193,6 +1653,52 @@ class WorkflowService:
             "account_results": account_results,
         }
 
+    def _execute_prepare_upload_context_step(
+        self,
+        executor: WorkflowExecutor,
+        parameters: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self.upload_service:
+            raise RuntimeError("Upload service is not available")
+
+        upload_job_id = int(parameters.get("upload_job_id") or 0)
+        if upload_job_id <= 0:
+            upload_job_id = int(executor.context.get("vars", {}).get("upload_job_id") or 0)
+        if upload_job_id <= 0:
+            existing_upload = executor.context.get("upload", {})
+            upload_job_id = int(existing_upload.get("id") or 0) if isinstance(existing_upload, dict) else 0
+        if upload_job_id <= 0:
+            raise RuntimeError("prepare_upload_context requires upload_job_id or existing upload context")
+
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+        if not upload_job:
+            raise RuntimeError("Upload job not found")
+
+        upload_context = self.upload_service._build_upload_context(upload_job)
+        executor.context["upload"] = upload_context
+        executor.context.setdefault("vars", {}).update(
+            {
+                "upload_job_id": upload_context["id"],
+                "upload_code_product": upload_context["code_product"],
+                "upload_link_product": upload_context["link_product"],
+                "upload_title": upload_context["title"],
+                "upload_description": upload_context["description"],
+                "upload_tags": upload_context["tags"],
+                "upload_video_url": upload_context["video_url"],
+                "upload_cover_url": upload_context["cover_url"],
+                "upload_local_video_path": upload_context["local_video_path"],
+                "upload_metadata": upload_context["metadata"],
+            }
+        )
+        return {
+            "upload_job_id": upload_context["id"],
+            "title": upload_context["title"],
+            "code_product": upload_context["code_product"],
+            "video_url": upload_context["video_url"],
+            "local_video_path": upload_context["local_video_path"],
+        }
+
     def export_workflow_definition(self, workflow_id: int) -> dict[str, Any]:
         workflow = self.workflow_repository.get_workflow(workflow_id)
         if not workflow:
@@ -1289,6 +1795,8 @@ class WorkflowService:
         device_platform_id: int | None = None,
         account_id: int | None = None,
         use_current_account: bool = False,
+        extra_context: dict[str, Any] | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._execute_workflow_run(
             workflow_id,
@@ -1297,6 +1805,8 @@ class WorkflowService:
             device_platform_id=device_platform_id,
             account_id=account_id,
             use_current_account=use_current_account,
+            extra_context=extra_context,
+            extra_metadata=extra_metadata,
         )
 
     def execute_step(
@@ -1307,6 +1817,8 @@ class WorkflowService:
         device_platform_id: int | None = None,
         account_id: int | None = None,
         use_current_account: bool = False,
+        extra_context: dict[str, Any] | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._execute_workflow_run(
             workflow_id,
@@ -1315,6 +1827,8 @@ class WorkflowService:
             device_platform_id=device_platform_id,
             account_id=account_id,
             use_current_account=use_current_account,
+            extra_context=extra_context,
+            extra_metadata=extra_metadata,
         )
 
     def _execute_workflow_run(
@@ -1325,6 +1839,8 @@ class WorkflowService:
         device_platform_id: int | None = None,
         account_id: int | None = None,
         use_current_account: bool = False,
+        extra_context: dict[str, Any] | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         workflow = self.workflow_repository.get_workflow(workflow_id)
         device_record = self.device_repository.get_device(device_id)
@@ -1376,6 +1892,11 @@ class WorkflowService:
                 )
             except Exception as exc:
                 return {"success": False, "message": str(exc)}
+
+        if extra_context:
+            shared_context = self._combine_shared_context(shared_context, extra_context)
+        if extra_metadata:
+            context_metadata.update(dict(extra_metadata))
 
         executor = self._executor_for_runtime(
             device=device,
@@ -1464,6 +1985,21 @@ class WorkflowService:
                 },
             )
             return {"success": False, "message": str(exc)}
+
+    def _combine_shared_context(
+        self,
+        base_context: dict[str, Any] | None,
+        extra_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for source in (base_context or {}, extra_context or {}):
+            for key, value in source.items():
+                if key == "vars" and isinstance(value, dict):
+                    merged.setdefault("vars", {})
+                    merged["vars"].update(value)
+                else:
+                    merged[key] = value
+        return merged
 
 
 class SchedulerService:

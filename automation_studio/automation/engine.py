@@ -5,6 +5,9 @@ import random
 import re
 import threading
 import time
+import shutil
+from urllib.parse import urlparse
+from urllib.request import urlretrieve
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,7 @@ class WorkflowExecutor:
         watcher_telemetry_service: Any | None = None,
         switch_account_handler: Any | None = None,
         run_for_each_account_handler: Any | None = None,
+        prepare_upload_context_handler: Any | None = None,
         shared_context: dict[str, Any] | None = None,
     ) -> None:
         self.device = device
@@ -42,6 +46,7 @@ class WorkflowExecutor:
         self.watcher_telemetry_service = watcher_telemetry_service
         self.switch_account_handler = switch_account_handler
         self.run_for_each_account_handler = run_for_each_account_handler
+        self.prepare_upload_context_handler = prepare_upload_context_handler
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_artifact_dir = (
             Path("artifacts")
@@ -65,6 +70,8 @@ class WorkflowExecutor:
                 self.context["platform"] = shared_context["platform"]
             if "account" in shared_context:
                 self.context["account"] = shared_context["account"]
+            if "upload" in shared_context:
+                self.context["upload"] = shared_context["upload"]
         self._watcher_runtime: dict[int, dict[str, Any]] = {}
         self._watcher_action_depth = 0
         self._stop_requested = False
@@ -209,6 +216,8 @@ class WorkflowExecutor:
             "scroll_to_selector": self._scroll_to_selector,
             "switch_account": self._switch_account,
             "run_for_each_account": self._run_for_each_account,
+            "prepare_upload_context": self._prepare_upload_context,
+            "download_video_asset": self._download_video_asset,
             "press_key": self._press_key,
             "input_keycode": self._input_keycode,
             "shell": self._shell,
@@ -966,6 +975,7 @@ class WorkflowExecutor:
             "device": self.context["device"],
             "platform": self.context.get("platform", {}),
             "account": self.context.get("account", {}),
+            "upload": self.context.get("upload", {}),
             "run": self.context["run"],
             "step": step,
             "parameters": parameters,
@@ -1200,6 +1210,51 @@ class WorkflowExecutor:
         if not self.run_for_each_account_handler:
             raise RuntimeError("run_for_each_account is not configured for this runtime")
         return self.run_for_each_account_handler(self, parameters, runtime)
+
+    def _prepare_upload_context(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        if not self.prepare_upload_context_handler:
+            raise RuntimeError("prepare_upload_context is not configured for this runtime")
+        return self.prepare_upload_context_handler(self, parameters, runtime)
+
+    def _download_video_asset(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        source = str(
+            parameters.get("video_url")
+            or self.context.get("upload", {}).get("video_url")
+            or self.context.get("vars", {}).get("upload_video_url")
+            or ""
+        ).strip()
+        if not source:
+            raise RuntimeError("download_video_asset requires video_url or upload.video_url")
+
+        directory = Path(parameters.get("directory", self.run_artifact_dir / "downloads"))
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = str(parameters.get("filename") or "").strip()
+        if not filename:
+            filename = self._filename_from_source(source)
+        target_path = directory / filename
+
+        parsed = urlparse(source)
+        if parsed.scheme in {"http", "https"}:
+            urlretrieve(source, target_path)
+        else:
+            source_path = Path(parsed.path if parsed.scheme == "file" else source)
+            if not source_path.exists():
+                raise RuntimeError(f"Video source not found: {source}")
+            if source_path.resolve() != target_path.resolve():
+                shutil.copy2(source_path, target_path)
+
+        self.context.setdefault("upload", {})
+        self.context["upload"]["local_video_path"] = str(target_path)
+        self.context["vars"]["upload_local_video_path"] = str(target_path)
+        return {"artifact_path": str(target_path), "local_video_path": str(target_path)}
+
+    def _filename_from_source(self, source: str) -> str:
+        parsed = urlparse(source)
+        candidate = Path(parsed.path if parsed.scheme else source).name
+        candidate = candidate or "video.mp4"
+        if "." not in candidate:
+            candidate += ".mp4"
+        return candidate
 
     def _run_swipe(self, parameters: dict[str, Any]) -> dict[str, Any]:
         x1, y1, x2, y2 = self._resolve_swipe_points(parameters)

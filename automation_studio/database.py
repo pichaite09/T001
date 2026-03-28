@@ -81,6 +81,8 @@ class DatabaseManager:
             (12, self._migration_012_workflow_schedules),
             (13, self._migration_013_schedule_groups_and_priority),
             (14, self._migration_014_device_runtime_info),
+            (15, self._migration_015_upload_jobs),
+            (16, self._migration_016_upload_templates_and_fields),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -532,3 +534,77 @@ class DatabaseManager:
                 ADD COLUMN last_info_json TEXT NOT NULL DEFAULT '{}'
                 """
             )
+
+    def _migration_015_upload_jobs(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS upload_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                device_platform_id INTEGER,
+                account_id INTEGER,
+                workflow_id INTEGER NOT NULL,
+                code_product TEXT NOT NULL DEFAULT '',
+                link_product TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                video_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                last_error TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT,
+                finished_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                FOREIGN KEY(device_platform_id) REFERENCES device_platforms(id) ON DELETE SET NULL,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _migration_016_upload_templates_and_fields(self, connection: sqlite3.Connection) -> None:
+        for column_name, default_sql in (
+            ("cover_url", "TEXT NOT NULL DEFAULT ''"),
+            ("local_video_path", "TEXT NOT NULL DEFAULT ''"),
+            ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if not self._column_exists(connection, "upload_jobs", column_name):
+                connection.execute(
+                    f"""
+                    ALTER TABLE upload_jobs
+                    ADD COLUMN {column_name} {default_sql}
+                    """
+                )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS upload_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                device_id INTEGER,
+                device_platform_id INTEGER,
+                account_id INTEGER,
+                workflow_id INTEGER,
+                code_product TEXT NOT NULL DEFAULT '',
+                link_product TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                description_template TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                video_url TEXT NOT NULL DEFAULT '',
+                cover_url TEXT NOT NULL DEFAULT '',
+                local_video_path TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE SET NULL,
+                FOREIGN KEY(device_platform_id) REFERENCES device_platforms(id) ON DELETE SET NULL,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE SET NULL
+            )
+            """
+        )

@@ -15,7 +15,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             db = DatabaseManager(db_path)
             db.init_schema()
 
-            self.assertEqual(db.current_schema_version(), 14)
+            self.assertEqual(db.current_schema_version(), 16)
 
             with db.connection() as connection:
                 device_columns = {
@@ -65,6 +65,14 @@ class DatabaseMigrationTests(unittest.TestCase):
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(workflow_schedules)").fetchall()
                 }
+                upload_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(upload_jobs)").fetchall()
+                }
+                upload_template_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(upload_templates)").fetchall()
+                }
 
             self.assertIn("last_info_json", device_columns)
             self.assertIn("definition_version", workflow_columns)
@@ -75,6 +83,14 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("login_id_normalized", account_columns)
             self.assertIn("schedule_group_id", schedule_columns)
             self.assertIn("priority", schedule_columns)
+            self.assertIn("code_product", upload_columns)
+            self.assertIn("video_url", upload_columns)
+            self.assertIn("cover_url", upload_columns)
+            self.assertIn("local_video_path", upload_columns)
+            self.assertIn("metadata_json", upload_columns)
+            self.assertIn("result_json", upload_columns)
+            self.assertIn("description_template", upload_template_columns)
+            self.assertIn("metadata_json", upload_template_columns)
             self.assertTrue(telemetry_tables)
             self.assertEqual(len(watcher_tables), 11)
         finally:

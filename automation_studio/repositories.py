@@ -1117,6 +1117,316 @@ class AccountRepository:
             connection.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
 
+class UploadRepository:
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def list_upload_jobs(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    upload_jobs.*,
+                    devices.name AS device_name,
+                    workflows.name AS workflow_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name
+                FROM upload_jobs
+                INNER JOIN devices ON devices.id = upload_jobs.device_id
+                INNER JOIN workflows ON workflows.id = upload_jobs.workflow_id
+                LEFT JOIN device_platforms ON device_platforms.id = upload_jobs.device_platform_id
+                LEFT JOIN accounts ON accounts.id = upload_jobs.account_id
+                ORDER BY upload_jobs.updated_at DESC, upload_jobs.id DESC
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_upload_job(self, upload_job_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    upload_jobs.*,
+                    devices.name AS device_name,
+                    workflows.name AS workflow_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name
+                FROM upload_jobs
+                INNER JOIN devices ON devices.id = upload_jobs.device_id
+                INNER JOIN workflows ON workflows.id = upload_jobs.workflow_id
+                LEFT JOIN device_platforms ON device_platforms.id = upload_jobs.device_platform_id
+                LEFT JOIN accounts ON accounts.id = upload_jobs.account_id
+                WHERE upload_jobs.id = ?
+                """,
+                (upload_job_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_upload_job(
+        self,
+        upload_job_id: int | None,
+        *,
+        device_id: int,
+        device_platform_id: int | None,
+        account_id: int | None,
+        workflow_id: int,
+        code_product: str,
+        link_product: str,
+        title: str,
+        description: str,
+        tags_json: str,
+        video_url: str,
+        cover_url: str,
+        local_video_path: str,
+        metadata_json: str,
+        status: str = "draft",
+    ) -> int:
+        timestamp = self.db.local_timestamp()
+        normalized_platform_id = int(device_platform_id) if device_platform_id else None
+        normalized_account_id = int(account_id) if account_id else None
+        if upload_job_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE upload_jobs
+                    SET device_id = ?, device_platform_id = ?, account_id = ?, workflow_id = ?,
+                        code_product = ?, link_product = ?, title = ?, description = ?, tags_json = ?, video_url = ?,
+                        cover_url = ?, local_video_path = ?, metadata_json = ?,
+                        status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        device_id,
+                        normalized_platform_id,
+                        normalized_account_id,
+                        workflow_id,
+                        code_product,
+                        link_product,
+                        title,
+                        description,
+                        tags_json,
+                        video_url,
+                        cover_url,
+                        local_video_path,
+                        metadata_json,
+                        status,
+                        timestamp,
+                        upload_job_id,
+                    ),
+                )
+            return upload_job_id
+
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO upload_jobs (
+                    device_id, device_platform_id, account_id, workflow_id,
+                    code_product, link_product, title, description, tags_json, video_url,
+                    cover_url, local_video_path, metadata_json,
+                    status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    device_id,
+                    normalized_platform_id,
+                    normalized_account_id,
+                    workflow_id,
+                    code_product,
+                    link_product,
+                    title,
+                    description,
+                    tags_json,
+                    video_url,
+                    cover_url,
+                    local_video_path,
+                    metadata_json,
+                    status,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_upload_job(self, upload_job_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM upload_jobs WHERE id = ?", (upload_job_id,))
+
+    def mark_upload_started(self, upload_job_id: int) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE upload_jobs
+                SET status = 'running', last_error = '', started_at = ?, finished_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, timestamp, upload_job_id),
+            )
+
+    def mark_upload_finished(
+        self,
+        upload_job_id: int,
+        *,
+        status: str,
+        last_error: str = "",
+        result_json: str = "{}",
+    ) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE upload_jobs
+                SET status = ?, last_error = ?, result_json = ?, finished_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, last_error, result_json, timestamp, timestamp, upload_job_id),
+            )
+
+    def list_upload_templates(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    upload_templates.*,
+                    devices.name AS device_name,
+                    workflows.name AS workflow_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name
+                FROM upload_templates
+                LEFT JOIN devices ON devices.id = upload_templates.device_id
+                LEFT JOIN workflows ON workflows.id = upload_templates.workflow_id
+                LEFT JOIN device_platforms ON device_platforms.id = upload_templates.device_platform_id
+                LEFT JOIN accounts ON accounts.id = upload_templates.account_id
+                WHERE upload_templates.is_active = 1
+                ORDER BY upload_templates.name COLLATE NOCASE, upload_templates.id
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_upload_template(self, template_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    upload_templates.*,
+                    devices.name AS device_name,
+                    workflows.name AS workflow_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name
+                FROM upload_templates
+                LEFT JOIN devices ON devices.id = upload_templates.device_id
+                LEFT JOIN workflows ON workflows.id = upload_templates.workflow_id
+                LEFT JOIN device_platforms ON device_platforms.id = upload_templates.device_platform_id
+                LEFT JOIN accounts ON accounts.id = upload_templates.account_id
+                WHERE upload_templates.id = ?
+                """,
+                (template_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_upload_template(
+        self,
+        template_id: int | None,
+        *,
+        name: str,
+        description: str,
+        device_id: int | None,
+        device_platform_id: int | None,
+        account_id: int | None,
+        workflow_id: int | None,
+        code_product: str,
+        link_product: str,
+        title: str,
+        description_template: str,
+        tags_json: str,
+        video_url: str,
+        cover_url: str,
+        local_video_path: str,
+        metadata_json: str,
+        is_active: bool = True,
+    ) -> int:
+        timestamp = self.db.local_timestamp()
+        normalized_device_id = int(device_id) if device_id else None
+        normalized_platform_id = int(device_platform_id) if device_platform_id else None
+        normalized_account_id = int(account_id) if account_id else None
+        normalized_workflow_id = int(workflow_id) if workflow_id else None
+        if template_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE upload_templates
+                    SET name = ?, description = ?, device_id = ?, device_platform_id = ?, account_id = ?, workflow_id = ?,
+                        code_product = ?, link_product = ?, title = ?, description_template = ?, tags_json = ?,
+                        video_url = ?, cover_url = ?, local_video_path = ?, metadata_json = ?, is_active = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        name,
+                        description,
+                        normalized_device_id,
+                        normalized_platform_id,
+                        normalized_account_id,
+                        normalized_workflow_id,
+                        code_product,
+                        link_product,
+                        title,
+                        description_template,
+                        tags_json,
+                        video_url,
+                        cover_url,
+                        local_video_path,
+                        metadata_json,
+                        int(is_active),
+                        timestamp,
+                        template_id,
+                    ),
+                )
+            return template_id
+
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO upload_templates (
+                    name, description, device_id, device_platform_id, account_id, workflow_id,
+                    code_product, link_product, title, description_template, tags_json,
+                    video_url, cover_url, local_video_path, metadata_json, is_active,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    description,
+                    normalized_device_id,
+                    normalized_platform_id,
+                    normalized_account_id,
+                    normalized_workflow_id,
+                    code_product,
+                    link_product,
+                    title,
+                    description_template,
+                    tags_json,
+                    video_url,
+                    cover_url,
+                    local_video_path,
+                    metadata_json,
+                    int(is_active),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_upload_template(self, template_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM upload_templates WHERE id = ?", (template_id,))
+
+
 class ScheduleRepository:
     def __init__(self, db: DatabaseManager) -> None:
         self.db = db

@@ -669,6 +669,48 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="prepare_upload_context",
+        label="Prepare Upload Context",
+        description="Load the selected upload job into workflow context so later steps can use upload fields and local vars.",
+        template={"upload_job_id": 0},
+        fields=(
+            StepField("upload_job_id", "Upload Job ID", field_type="int", default=0, min_value=0),
+        ),
+        presets=(
+            StepPreset(
+                "Use Current Upload Job",
+                "Use the upload job already selected by the Uploads page or existing runtime context.",
+                {"upload_job_id": 0},
+            ),
+        ),
+    ),
+    StepDefinition(
+        key="download_video_asset",
+        label="Download Video Asset",
+        description="Download or copy the upload video to a local artifact path and store it in upload.local_video_path.",
+        template={
+            "video_url": "${upload.get('video_url')}",
+            "directory": "artifacts/uploads",
+            "filename": "upload_video.mp4",
+        },
+        fields=(
+            StepField("video_url", "Video URL", default="${upload.get('video_url')}", placeholder="https://example.com/video.mp4"),
+            StepField("directory", "Directory", default="artifacts/uploads"),
+            StepField("filename", "Filename", default="upload_video.mp4"),
+        ),
+        presets=(
+            StepPreset(
+                "Download Current Upload Video",
+                "Download the current upload job video into the local artifacts folder.",
+                {
+                    "video_url": "${upload.get('video_url')}",
+                    "directory": "artifacts/uploads",
+                    "filename": "upload_video.mp4",
+                },
+            ),
+        ),
+    ),
+    StepDefinition(
         key="press_key",
         label="Press Key",
         description="Press common Android keys such as home, back, or enter.",
@@ -1128,6 +1170,15 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         target_workflow_id = _safe_int(parameters.get("target_workflow_id"), "Target Workflow ID", errors)
         if target_workflow_id is not None and target_workflow_id < 1:
             errors.append("Target Workflow ID must be greater than or equal to 1")
+
+    if step_type == "prepare_upload_context":
+        upload_job_id = _safe_int(parameters.get("upload_job_id", 0) or 0, "Upload Job ID", errors)
+        if upload_job_id is not None and upload_job_id < 0:
+            errors.append("Upload Job ID must be greater than or equal to 0")
+
+    if step_type == "download_video_asset":
+        if not str(parameters.get("video_url", "")).strip():
+            errors.append("Video URL is required")
 
     if step_type == "press_key" and not str(parameters.get("key", "")).strip():
         errors.append("Key is required")

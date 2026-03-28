@@ -14,6 +14,7 @@ from automation_studio.repositories import (
     ScheduleRepository,
     ScheduleRunRepository,
     TelemetryRepository,
+    UploadRepository,
     WatcherRepository,
     WatcherTelemetryRepository,
     WorkflowRepository,
@@ -24,6 +25,7 @@ from automation_studio.services import (
     LogService,
     SchedulerService,
     TelemetryService,
+    UploadService,
     WatcherService,
     WatcherTelemetryService,
     WorkflowService,
@@ -32,6 +34,7 @@ from automation_studio.ui.pages.accounts_page import AccountsPage
 from automation_studio.ui.pages.devices_page import DevicesPage
 from automation_studio.ui.pages.log_page import LogPage
 from automation_studio.ui.pages.schedules_page import ScheduleRunThread, SchedulesPage
+from automation_studio.ui.pages.uploads_page import UploadsPage
 from automation_studio.ui.pages.watchers_page import WatchersPage
 from automation_studio.ui.pages.workflow_page import WorkflowPage
 from automation_studio.ui.theme import APP_STYLESHEET
@@ -58,6 +61,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.device_repository = DeviceRepository(self.db)
         self.account_repository = AccountRepository(self.db)
         self.workflow_repository = WorkflowRepository(self.db)
+        self.upload_repository = UploadRepository(self.db)
         self.schedule_group_repository = ScheduleGroupRepository(self.db)
         self.schedule_repository = ScheduleRepository(self.db)
         self.schedule_run_repository = ScheduleRunRepository(self.db)
@@ -71,6 +75,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.account_repository,
             self.device_repository,
             self.workflow_repository,
+        )
+        self.upload_service = UploadService(
+            self.upload_repository,
+            self.device_repository,
+            self.workflow_repository,
+            self.account_service,
         )
         self.log_service = LogService(self.log_repository)
         self.telemetry_service = TelemetryService(self.telemetry_repository)
@@ -92,6 +102,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.watcher_telemetry_service,
             self.account_service,
         )
+        self.workflow_service.bind_upload_service(self.upload_service)
+        self.upload_service.bind_workflow_service(self.workflow_service)
         self.scheduler_service = SchedulerService(
             self.schedule_repository,
             self.schedule_run_repository,
@@ -123,7 +135,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.nav_list = QtWidgets.QListWidget()
         self.nav_list.setObjectName("navList")
-        self.nav_list.addItems(["Devices", "Accounts", "Workflow", "Schedules", "Watchers", "Log"])
+        self.nav_list.addItems(["Devices", "Accounts", "Uploads", "Workflow", "Schedules", "Watchers", "Log"])
         self.nav_list.setCurrentRow(0)
         nav_layout.addWidget(self.nav_list, 1)
 
@@ -148,6 +160,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.account_service,
             self.device_service,
             self.workflow_service,
+        )
+        self.uploads_page = UploadsPage(
+            self.upload_service,
+            self.workflow_service,
+            self.device_service,
+            self.account_service,
         )
         self.workflow_page = WorkflowPage(
             self.workflow_service,
@@ -178,6 +196,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.stack.addWidget(self.devices_page)
         self.stack.addWidget(self.accounts_page)
+        self.stack.addWidget(self.uploads_page)
         self.stack.addWidget(self.workflow_page)
         self.stack.addWidget(self.schedules_page)
         self.stack.addWidget(self.watchers_page)
@@ -187,14 +206,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.nav_list.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.devices_page.devices_changed.connect(self.accounts_page.refresh_devices)
+        self.devices_page.devices_changed.connect(self.uploads_page.refresh_devices)
+        self.devices_page.devices_changed.connect(self.uploads_page.load_upload_jobs)
         self.devices_page.devices_changed.connect(self.workflow_page.refresh_devices)
         self.devices_page.devices_changed.connect(self.schedules_page.refresh_devices)
         self.devices_page.devices_changed.connect(self.watchers_page.load_watchers)
         self.devices_page.devices_changed.connect(self.log_page.refresh_filters)
         self.accounts_page.accounts_changed.connect(self.log_page.refresh_filters)
+        self.accounts_page.accounts_changed.connect(self.uploads_page.refresh_devices)
         self.accounts_page.accounts_changed.connect(self.workflow_page.refresh_runtime_targets)
         self.accounts_page.accounts_changed.connect(self.schedules_page.refresh_devices)
+        self.accounts_page.accounts_changed.connect(self.uploads_page.load_upload_jobs)
         self.workflow_page.workflows_changed.connect(self.accounts_page.refresh_workflows)
+        self.workflow_page.workflows_changed.connect(self.uploads_page.refresh_workflows)
+        self.workflow_page.workflows_changed.connect(self.uploads_page.load_upload_jobs)
         self.workflow_page.workflows_changed.connect(self.schedules_page.refresh_workflows)
         self.workflow_page.workflows_changed.connect(self.schedules_page.load_schedules)
         self.workflow_page.workflows_changed.connect(self.log_page.refresh_filters)
@@ -204,6 +229,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.schedules_page.logs_changed.connect(self.log_page.load_logs)
         self.schedules_page.run_requested.connect(self._run_schedule_now)
         self.schedules_page.toggle_requested.connect(self._toggle_schedule_enabled)
+        self.uploads_page.uploads_changed.connect(self.log_page.load_logs)
+        self.uploads_page.logs_changed.connect(self.log_page.load_logs)
         self.watchers_page.watchers_changed.connect(self.log_page.refresh_filters)
         self.watchers_page.watchers_changed.connect(self.workflow_page.load_linked_watchers)
         self.watchers_page.logs_changed.connect(self.log_page.load_logs)
