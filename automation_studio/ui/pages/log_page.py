@@ -59,6 +59,16 @@ class LogPage(QtWidgets.QWidget):
         self.status_filter = QtWidgets.QComboBox()
         self.status_filter.addItem("All Status", "all")
         for label, value in (
+            ("Schedule Started", "schedule_started"),
+            ("Schedule Success", "schedule_success"),
+            ("Schedule Failed", "schedule_failed"),
+            ("Schedule Retry", "schedule_retry"),
+            ("Schedule Queued", "schedule_queued"),
+            ("Schedule Skipped Overlap", "schedule_skipped_overlap"),
+            ("Schedule Missed Skipped", "schedule_missed_skipped"),
+            ("Schedule Missed Rescheduled", "schedule_missed_rescheduled"),
+            ("Schedule Paused", "schedule_paused"),
+            ("Schedule Resumed", "schedule_resumed"),
             ("Workflow Started", "workflow_started"),
             ("Workflow Success", "workflow_success"),
             ("Workflow Stopped", "workflow_stopped"),

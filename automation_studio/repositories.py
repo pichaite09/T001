@@ -1103,3 +1103,374 @@ class AccountRepository:
     def delete_account(self, account_id: int) -> None:
         with self.db.connection() as connection:
             connection.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+
+
+class ScheduleRepository:
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def list_schedules(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    workflow_schedules.*,
+                    workflows.name AS workflow_name,
+                    devices.name AS device_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name,
+                    schedule_groups.name AS group_name,
+                    schedule_groups.is_enabled AS group_is_enabled
+                FROM workflow_schedules
+                INNER JOIN workflows ON workflows.id = workflow_schedules.workflow_id
+                INNER JOIN devices ON devices.id = workflow_schedules.device_id
+                LEFT JOIN device_platforms ON device_platforms.id = workflow_schedules.device_platform_id
+                LEFT JOIN accounts ON accounts.id = workflow_schedules.account_id
+                LEFT JOIN schedule_groups ON schedule_groups.id = workflow_schedules.schedule_group_id
+                ORDER BY workflow_schedules.priority ASC, workflow_schedules.name COLLATE NOCASE, workflow_schedules.id
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_schedule(self, schedule_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    workflow_schedules.*,
+                    workflows.name AS workflow_name,
+                    devices.name AS device_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name,
+                    schedule_groups.name AS group_name,
+                    schedule_groups.is_enabled AS group_is_enabled
+                FROM workflow_schedules
+                INNER JOIN workflows ON workflows.id = workflow_schedules.workflow_id
+                INNER JOIN devices ON devices.id = workflow_schedules.device_id
+                LEFT JOIN device_platforms ON device_platforms.id = workflow_schedules.device_platform_id
+                LEFT JOIN accounts ON accounts.id = workflow_schedules.account_id
+                LEFT JOIN schedule_groups ON schedule_groups.id = workflow_schedules.schedule_group_id
+                WHERE workflow_schedules.id = ?
+                """,
+                (schedule_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_schedule(
+        self,
+        schedule_id: int | None,
+        name: str,
+        workflow_id: int,
+        device_id: int,
+        schedule_group_id: int | None,
+        device_platform_id: int | None,
+        account_id: int | None,
+        use_current_account: bool,
+        schedule_type: str,
+        schedule_json: str,
+        next_run_at: str | None,
+        priority: int,
+        is_enabled: bool = True,
+    ) -> int:
+        timestamp = self.db.local_timestamp()
+        normalized_schedule_group_id = int(schedule_group_id) if schedule_group_id else None
+        normalized_device_platform_id = int(device_platform_id) if device_platform_id else None
+        normalized_account_id = int(account_id) if account_id else None
+        if schedule_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE workflow_schedules
+                    SET name = ?, workflow_id = ?, device_id = ?, schedule_group_id = ?, device_platform_id = ?, account_id = ?,
+                        use_current_account = ?, schedule_type = ?, schedule_json = ?, next_run_at = ?,
+                        priority = ?, is_enabled = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        name,
+                        workflow_id,
+                        device_id,
+                        normalized_schedule_group_id,
+                        normalized_device_platform_id,
+                        normalized_account_id,
+                        int(use_current_account),
+                        schedule_type,
+                        schedule_json,
+                        next_run_at,
+                        int(priority),
+                        int(is_enabled),
+                        timestamp,
+                        schedule_id,
+                    ),
+                )
+            return schedule_id
+
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO workflow_schedules (
+                    name, workflow_id, device_id, schedule_group_id, device_platform_id, account_id,
+                    use_current_account, schedule_type, schedule_json, next_run_at,
+                    priority, is_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    workflow_id,
+                    device_id,
+                    normalized_schedule_group_id,
+                    normalized_device_platform_id,
+                    normalized_account_id,
+                    int(use_current_account),
+                    schedule_type,
+                    schedule_json,
+                    next_run_at,
+                    int(priority),
+                    int(is_enabled),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM workflow_schedules WHERE id = ?", (schedule_id,))
+
+    def due_schedules(self, now_timestamp: str) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    workflow_schedules.*,
+                    workflows.name AS workflow_name,
+                    devices.name AS device_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name,
+                    schedule_groups.name AS group_name,
+                    schedule_groups.is_enabled AS group_is_enabled
+                FROM workflow_schedules
+                INNER JOIN workflows ON workflows.id = workflow_schedules.workflow_id
+                INNER JOIN devices ON devices.id = workflow_schedules.device_id
+                LEFT JOIN device_platforms ON device_platforms.id = workflow_schedules.device_platform_id
+                LEFT JOIN accounts ON accounts.id = workflow_schedules.account_id
+                LEFT JOIN schedule_groups ON schedule_groups.id = workflow_schedules.schedule_group_id
+                WHERE workflow_schedules.is_enabled = 1
+                  AND workflow_schedules.next_run_at IS NOT NULL
+                  AND workflow_schedules.next_run_at <= ?
+                  AND COALESCE(schedule_groups.is_enabled, 1) = 1
+                ORDER BY workflow_schedules.next_run_at ASC, workflow_schedules.priority ASC, workflow_schedules.id ASC
+                """,
+                (now_timestamp,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def update_schedule_state(
+        self,
+        schedule_id: int,
+        *,
+        next_run_at: str | None = None,
+        last_run_at: str | None = None,
+        last_status: str | None = None,
+        is_enabled: bool | None = None,
+    ) -> None:
+        updates: list[str] = ["updated_at = ?"]
+        values: list[Any] = [self.db.local_timestamp()]
+        if next_run_at is not None or next_run_at is None:
+            updates.append("next_run_at = ?")
+            values.append(next_run_at)
+        if last_run_at is not None:
+            updates.append("last_run_at = ?")
+            values.append(last_run_at)
+        if last_status is not None:
+            updates.append("last_status = ?")
+            values.append(last_status)
+        if is_enabled is not None:
+            updates.append("is_enabled = ?")
+            values.append(int(is_enabled))
+        values.append(schedule_id)
+        with self.db.connection() as connection:
+            connection.execute(
+                f"""
+                UPDATE workflow_schedules
+                SET {', '.join(updates)}
+                WHERE id = ?
+                """,
+                values,
+            )
+
+
+class ScheduleGroupRepository:
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    schedule_groups.*,
+                    COUNT(workflow_schedules.id) AS schedule_count,
+                    SUM(CASE WHEN workflow_schedules.is_enabled = 1 THEN 1 ELSE 0 END) AS enabled_schedule_count
+                FROM schedule_groups
+                LEFT JOIN workflow_schedules ON workflow_schedules.schedule_group_id = schedule_groups.id
+                GROUP BY schedule_groups.id
+                ORDER BY schedule_groups.name COLLATE NOCASE, schedule_groups.id
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_group(self, group_id: int) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    schedule_groups.*,
+                    COUNT(workflow_schedules.id) AS schedule_count,
+                    SUM(CASE WHEN workflow_schedules.is_enabled = 1 THEN 1 ELSE 0 END) AS enabled_schedule_count
+                FROM schedule_groups
+                LEFT JOIN workflow_schedules ON workflow_schedules.schedule_group_id = schedule_groups.id
+                WHERE schedule_groups.id = ?
+                GROUP BY schedule_groups.id
+                """,
+                (group_id,),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def upsert_group(self, group_id: int | None, name: str, description: str, is_enabled: bool = True) -> int:
+        timestamp = self.db.local_timestamp()
+        if group_id:
+            with self.db.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE schedule_groups
+                    SET name = ?, description = ?, is_enabled = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (name, description, int(is_enabled), timestamp, group_id),
+                )
+            return int(group_id)
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO schedule_groups (name, description, is_enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, description, int(is_enabled), timestamp, timestamp),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_group(self, group_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                "UPDATE workflow_schedules SET schedule_group_id = NULL, updated_at = ? WHERE schedule_group_id = ?",
+                (self.db.local_timestamp(), group_id),
+            )
+            connection.execute("DELETE FROM schedule_groups WHERE id = ?", (group_id,))
+
+    def set_group_enabled(self, group_id: int, is_enabled: bool) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE schedule_groups
+                SET is_enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (int(is_enabled), self.db.local_timestamp(), group_id),
+            )
+
+
+class ScheduleRunRepository:
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def add_run(
+        self,
+        schedule_id: int,
+        workflow_id: int,
+        device_id: int,
+        trigger_source: str,
+        status: str,
+        message: str,
+        metadata: dict[str, Any] | None,
+        started_at: str,
+        finished_at: str | None,
+    ) -> int:
+        payload = json.dumps(metadata or {}, ensure_ascii=False)
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO schedule_runs (
+                    schedule_id, workflow_id, device_id, trigger_source, status, message,
+                    metadata, started_at, finished_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    schedule_id,
+                    workflow_id,
+                    device_id,
+                    trigger_source,
+                    status,
+                    message,
+                    payload,
+                    started_at,
+                    finished_at,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_runs(self, schedule_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        conditions: list[str] = []
+        values: list[Any] = []
+        if schedule_id:
+            conditions.append("schedule_runs.schedule_id = ?")
+            values.append(schedule_id)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        values.append(limit)
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    schedule_runs.*,
+                    workflow_schedules.name AS schedule_name,
+                    workflow_schedules.priority,
+                    workflows.name AS workflow_name,
+                    devices.name AS device_name
+                FROM schedule_runs
+                INNER JOIN workflow_schedules ON workflow_schedules.id = schedule_runs.schedule_id
+                INNER JOIN workflows ON workflows.id = schedule_runs.workflow_id
+                INNER JOIN devices ON devices.id = schedule_runs.device_id
+                {where_clause}
+                ORDER BY schedule_runs.started_at DESC, schedule_runs.id DESC
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def list_recent_failed_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    schedule_runs.*,
+                    workflow_schedules.name AS schedule_name,
+                    workflow_schedules.priority,
+                    workflows.name AS workflow_name,
+                    devices.name AS device_name
+                FROM schedule_runs
+                INNER JOIN workflow_schedules ON workflow_schedules.id = schedule_runs.schedule_id
+                INNER JOIN workflows ON workflows.id = schedule_runs.workflow_id
+                INNER JOIN devices ON devices.id = schedule_runs.device_id
+                WHERE schedule_runs.status = 'failed'
+                ORDER BY schedule_runs.started_at DESC, schedule_runs.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]

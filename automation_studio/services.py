@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import json
+import random
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Any
 
 from automation_studio.automation.engine import WorkflowExecutor
@@ -20,6 +22,9 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    ScheduleGroupRepository,
+    ScheduleRepository,
+    ScheduleRunRepository,
     TelemetryRepository,
     WatcherRepository,
     WatcherTelemetryRepository,
@@ -1359,3 +1364,1007 @@ class WorkflowService:
                 },
             )
             return {"success": False, "message": str(exc)}
+
+
+class SchedulerService:
+    SCHEDULE_TYPES = {"once", "interval", "daily"}
+    TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+    def __init__(
+        self,
+        schedule_repository: ScheduleRepository,
+        schedule_run_repository: ScheduleRunRepository,
+        workflow_repository: WorkflowRepository,
+        device_repository: DeviceRepository,
+        workflow_service: WorkflowService,
+        log_service: LogService,
+        account_service: AccountService | None = None,
+        schedule_group_repository: ScheduleGroupRepository | None = None,
+    ) -> None:
+        self.schedule_repository = schedule_repository
+        self.schedule_run_repository = schedule_run_repository
+        self.workflow_repository = workflow_repository
+        self.device_repository = device_repository
+        self.workflow_service = workflow_service
+        self.log_service = log_service
+        self.account_service = account_service
+        self.schedule_group_repository = schedule_group_repository
+
+    def list_schedules(self) -> list[dict[str, Any]]:
+        schedules = self.schedule_repository.list_schedules()
+        for schedule in schedules:
+            schedule["schedule_config"] = self._load_schedule_config(schedule.get("schedule_json"))
+            schedule["schedule_summary"] = self.describe_schedule(
+                str(schedule.get("schedule_type") or ""),
+                schedule["schedule_config"],
+            )
+        return schedules
+
+    def get_schedule(self, schedule_id: int) -> dict[str, Any] | None:
+        schedule = self.schedule_repository.get_schedule(schedule_id)
+        if not schedule:
+            return None
+        schedule["schedule_config"] = self._load_schedule_config(schedule.get("schedule_json"))
+        schedule["schedule_summary"] = self.describe_schedule(
+            str(schedule.get("schedule_type") or ""),
+            schedule["schedule_config"],
+        )
+        return schedule
+
+    def list_runs(self, schedule_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        return self.schedule_run_repository.list_runs(schedule_id=schedule_id, limit=limit)
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        if not self.schedule_group_repository:
+            return []
+        return self.schedule_group_repository.list_groups()
+
+    def get_group(self, group_id: int) -> dict[str, Any] | None:
+        if not self.schedule_group_repository:
+            return None
+        return self.schedule_group_repository.get_group(group_id)
+
+    def list_due_schedules(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        due_schedules = self.schedule_repository.due_schedules(self._format_timestamp(now or datetime.now().astimezone()))
+        for schedule in due_schedules:
+            schedule["schedule_config"] = self._load_schedule_config(schedule.get("schedule_json"))
+        return due_schedules
+
+    def save_schedule(
+        self,
+        schedule_id: int | None,
+        name: str,
+        workflow_id: int,
+        device_id: int,
+        device_platform_id: int | None,
+        account_id: int | None,
+        use_current_account: bool,
+        schedule_type: str,
+        schedule_config: dict[str, Any],
+        is_enabled: bool = True,
+        schedule_group_id: int | None = None,
+        priority: int = 100,
+    ) -> int:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("Schedule name is required")
+        normalized_schedule_type = str(schedule_type or "").strip().lower()
+        if normalized_schedule_type not in self.SCHEDULE_TYPES:
+            raise ValueError("Unsupported schedule type")
+        workflow = self.workflow_repository.get_workflow(int(workflow_id))
+        if not workflow:
+            raise ValueError("Workflow not found")
+        device = self.device_repository.get_device(int(device_id))
+        if not device:
+            raise ValueError("Device not found")
+
+        normalized_schedule_group_id = int(schedule_group_id or 0) or None
+        normalized_device_platform_id = int(device_platform_id or 0) or None
+        normalized_account_id = int(account_id or 0) or None
+        normalized_priority = max(1, min(999, int(priority or 100)))
+        if normalized_schedule_group_id:
+            if not self.schedule_group_repository:
+                raise ValueError("Schedule groups are not available")
+            group = self.schedule_group_repository.get_group(normalized_schedule_group_id)
+            if not group:
+                raise ValueError("Schedule group not found")
+        if normalized_device_platform_id and self.account_service:
+            platform = self.account_service.get_device_platform(normalized_device_platform_id)
+            if not platform or int(platform.get("device_id") or device_id) != int(device_id):
+                raise ValueError("Platform not found on this device")
+            if normalized_account_id:
+                account = self.account_service.get_account(normalized_account_id)
+                if not account or int(account.get("device_platform_id") or 0) != normalized_device_platform_id:
+                    raise ValueError("Account not found for this platform")
+        elif normalized_account_id:
+            raise ValueError("Account requires a selected platform")
+
+        validated_config = self._validate_schedule_config(normalized_schedule_type, schedule_config)
+        next_run_at = (
+            self._format_timestamp(self._compute_next_run(normalized_schedule_type, validated_config))
+            if is_enabled
+            else None
+        )
+        return self.schedule_repository.upsert_schedule(
+            schedule_id=schedule_id,
+            name=normalized_name,
+            workflow_id=int(workflow_id),
+            device_id=int(device_id),
+            device_platform_id=normalized_device_platform_id,
+            account_id=None if use_current_account else normalized_account_id,
+            use_current_account=bool(use_current_account),
+            schedule_type=normalized_schedule_type,
+            schedule_json=json.dumps(validated_config, ensure_ascii=False, indent=2),
+            next_run_at=next_run_at,
+            is_enabled=is_enabled,
+        )
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        self.schedule_repository.delete_schedule(schedule_id)
+
+    def execute_schedule(
+        self,
+        schedule_id: int,
+        *,
+        trigger_source: str = "manual",
+        advance_schedule: bool = False,
+    ) -> dict[str, Any]:
+        schedule = self.get_schedule(schedule_id)
+        if not schedule:
+            return {"success": False, "message": "Schedule not found"}
+        if not bool(schedule.get("is_enabled", 1)) and trigger_source != "manual":
+            return {"success": False, "message": "Schedule is disabled"}
+
+        started_at_dt = datetime.now().astimezone()
+        started_at = self._format_timestamp(started_at_dt)
+        self.log_service.add(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            "INFO",
+            "schedule_started",
+            f"Started schedule '{schedule['name']}'",
+            {
+                "schedule_id": int(schedule["id"]),
+                "schedule_name": str(schedule["name"]),
+                "trigger_source": trigger_source,
+            },
+        )
+
+        result = self.workflow_service.execute_workflow(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            device_platform_id=int(schedule.get("device_platform_id") or 0) or None,
+            account_id=int(schedule.get("account_id") or 0) or None,
+            use_current_account=bool(schedule.get("use_current_account", 0)),
+        )
+
+        finished_at_dt = datetime.now().astimezone()
+        finished_at = self._format_timestamp(finished_at_dt)
+        was_successful = bool(result.get("success"))
+        run_status = "success" if was_successful else "failed"
+        next_run_at: str | None = schedule.get("next_run_at")
+        schedule_enabled = bool(schedule.get("is_enabled", 1))
+
+        if advance_schedule:
+            computed_next_run = self._compute_next_run(
+                str(schedule.get("schedule_type") or ""),
+                schedule.get("schedule_config") or self._load_schedule_config(schedule.get("schedule_json")),
+                reference=finished_at_dt,
+            )
+            if str(schedule.get("schedule_type") or "") == "once":
+                schedule_enabled = False
+                next_run_at = None
+            else:
+                next_run_at = self._format_timestamp(computed_next_run) if computed_next_run else None
+
+        self.schedule_repository.update_schedule_state(
+            int(schedule["id"]),
+            next_run_at=next_run_at,
+            last_run_at=finished_at,
+            last_status=run_status,
+            is_enabled=schedule_enabled,
+        )
+        self.schedule_run_repository.add_run(
+            schedule_id=int(schedule["id"]),
+            workflow_id=int(schedule["workflow_id"]),
+            device_id=int(schedule["device_id"]),
+            trigger_source=str(trigger_source),
+            status=run_status,
+            message=str(result.get("message") or ""),
+            metadata={
+                "schedule_name": str(schedule["name"]),
+                "advance_schedule": bool(advance_schedule),
+                "next_run_at": next_run_at,
+            },
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        self.log_service.add(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            "INFO" if was_successful else "ERROR",
+            "schedule_success" if was_successful else "schedule_failed",
+            f"Schedule '{schedule['name']}' {'completed' if was_successful else 'failed'}",
+            {
+                "schedule_id": int(schedule["id"]),
+                "schedule_name": str(schedule["name"]),
+                "trigger_source": trigger_source,
+                "next_run_at": next_run_at,
+                "result_message": str(result.get("message") or ""),
+            },
+        )
+        return {
+            "success": was_successful,
+            "message": str(result.get("message") or ""),
+            "schedule_id": int(schedule["id"]),
+            "schedule_name": str(schedule["name"]),
+            "run_status": run_status,
+            "trigger_source": trigger_source,
+            "next_run_at": next_run_at,
+        }
+
+    def describe_schedule(self, schedule_type: str, schedule_config: dict[str, Any]) -> str:
+        normalized_schedule_type = str(schedule_type or "").strip().lower()
+        if normalized_schedule_type == "once":
+            return f"Once at {schedule_config.get('run_at', '-')}"
+        if normalized_schedule_type == "interval":
+            minutes = int(schedule_config.get("every_minutes") or 0)
+            return f"Every {minutes} minute{'s' if minutes != 1 else ''}"
+        if normalized_schedule_type == "daily":
+            return f"Daily at {schedule_config.get('time', '-')}"
+        return normalized_schedule_type or "-"
+
+    def _load_schedule_config(self, payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return dict(payload)
+        try:
+            loaded = json.loads(payload or "{}")
+        except Exception:
+            loaded = {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _validate_schedule_config(self, schedule_type: str, schedule_config: dict[str, Any]) -> dict[str, Any]:
+        config = dict(schedule_config or {})
+        if schedule_type == "once":
+            run_at = str(config.get("run_at") or "").strip()
+            if not run_at:
+                raise ValueError("Run once schedule requires run_at")
+            parsed = self._parse_timestamp(run_at)
+            return {"run_at": self._format_timestamp(parsed)}
+        if schedule_type == "interval":
+            every_minutes = int(config.get("every_minutes") or 0)
+            if every_minutes <= 0:
+                raise ValueError("Interval schedule requires every_minutes > 0")
+            return {"every_minutes": every_minutes}
+        if schedule_type == "daily":
+            time_text = str(config.get("time") or "").strip()
+            try:
+                parsed_time = datetime.strptime(time_text, "%H:%M")
+            except ValueError as exc:
+                raise ValueError("Daily schedule requires time in HH:MM") from exc
+            return {"time": parsed_time.strftime("%H:%M")}
+        raise ValueError("Unsupported schedule type")
+
+    def _compute_next_run(
+        self,
+        schedule_type: str,
+        schedule_config: dict[str, Any],
+        *,
+        reference: datetime | None = None,
+    ) -> datetime | None:
+        now = reference or datetime.now().astimezone()
+        if schedule_type == "once":
+            return self._parse_timestamp(str(schedule_config.get("run_at") or ""))
+        if schedule_type == "interval":
+            every_minutes = int(schedule_config.get("every_minutes") or 0)
+            return now + timedelta(minutes=every_minutes)
+        if schedule_type == "daily":
+            time_text = str(schedule_config.get("time") or "00:00")
+            scheduled_time = datetime.strptime(time_text, "%H:%M")
+            candidate = now.replace(
+                hour=scheduled_time.hour,
+                minute=scheduled_time.minute,
+                second=0,
+                microsecond=0,
+            )
+            if candidate <= now:
+                candidate += timedelta(days=1)
+            return candidate
+        return None
+
+    def _parse_timestamp(self, value: str) -> datetime:
+        for fmt in (self.TIMESTAMP_FORMAT, "%Y-%m-%d %H:%M"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                return parsed.astimezone() if parsed.tzinfo else parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            except ValueError:
+                continue
+        raise ValueError("Timestamp must be in YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS format")
+
+    def _format_timestamp(self, value: datetime) -> str:
+        localized = value if value.tzinfo else value.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return localized.astimezone().strftime(self.TIMESTAMP_FORMAT)
+
+
+class SchedulerService:
+    SCHEDULE_TYPES = {"once", "interval", "daily", "weekly"}
+    MISSED_RUN_POLICIES = {"run_immediately", "skip", "reschedule_next"}
+    OVERLAP_POLICIES = {"skip_if_running", "queue_next"}
+    TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+    WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    def __init__(
+        self,
+        schedule_repository: ScheduleRepository,
+        schedule_run_repository: ScheduleRunRepository,
+        workflow_repository: WorkflowRepository,
+        device_repository: DeviceRepository,
+        workflow_service: WorkflowService,
+        log_service: LogService,
+        account_service: AccountService | None = None,
+        schedule_group_repository: ScheduleGroupRepository | None = None,
+    ) -> None:
+        self.schedule_repository = schedule_repository
+        self.schedule_run_repository = schedule_run_repository
+        self.workflow_repository = workflow_repository
+        self.device_repository = device_repository
+        self.workflow_service = workflow_service
+        self.log_service = log_service
+        self.account_service = account_service
+        self.schedule_group_repository = schedule_group_repository
+
+    def list_schedules(self) -> list[dict[str, Any]]:
+        schedules = self.schedule_repository.list_schedules()
+        for schedule in schedules:
+            schedule["schedule_config"] = self._load_schedule_config(schedule.get("schedule_json"))
+            schedule["schedule_summary"] = self.describe_schedule(
+                str(schedule.get("schedule_type") or ""),
+                schedule["schedule_config"],
+            )
+        return schedules
+
+    def get_schedule(self, schedule_id: int) -> dict[str, Any] | None:
+        schedule = self.schedule_repository.get_schedule(schedule_id)
+        if not schedule:
+            return None
+        schedule["schedule_config"] = self._load_schedule_config(schedule.get("schedule_json"))
+        schedule["schedule_summary"] = self.describe_schedule(
+            str(schedule.get("schedule_type") or ""),
+            schedule["schedule_config"],
+        )
+        return schedule
+
+    def list_runs(self, schedule_id: int | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        return self.schedule_run_repository.list_runs(schedule_id=schedule_id, limit=limit)
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        if not self.schedule_group_repository:
+            return []
+        return self.schedule_group_repository.list_groups()
+
+    def get_group(self, group_id: int) -> dict[str, Any] | None:
+        if not self.schedule_group_repository:
+            return None
+        return self.schedule_group_repository.get_group(group_id)
+
+    def list_due_schedules(self, now: datetime | None = None) -> list[dict[str, Any]]:
+        due_schedules = self.schedule_repository.due_schedules(self._format_timestamp(now or datetime.now().astimezone()))
+        for schedule in due_schedules:
+            schedule["schedule_config"] = self._load_schedule_config(schedule.get("schedule_json"))
+            schedule["schedule_summary"] = self.describe_schedule(
+                str(schedule.get("schedule_type") or ""),
+                schedule["schedule_config"],
+            )
+        return due_schedules
+
+    def save_schedule(
+        self,
+        schedule_id: int | None,
+        name: str,
+        workflow_id: int,
+        device_id: int,
+        device_platform_id: int | None,
+        account_id: int | None,
+        use_current_account: bool,
+        schedule_type: str,
+        schedule_config: dict[str, Any],
+        is_enabled: bool = True,
+        schedule_group_id: int | None = None,
+        priority: int = 100,
+    ) -> int:
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("Schedule name is required")
+        normalized_schedule_type = str(schedule_type or "").strip().lower()
+        if normalized_schedule_type not in self.SCHEDULE_TYPES:
+            raise ValueError("Unsupported schedule type")
+        if not self.workflow_repository.get_workflow(int(workflow_id)):
+            raise ValueError("Workflow not found")
+        if not self.device_repository.get_device(int(device_id)):
+            raise ValueError("Device not found")
+
+        normalized_schedule_group_id = int(schedule_group_id or 0) or None
+        normalized_device_platform_id = int(device_platform_id or 0) or None
+        normalized_account_id = int(account_id or 0) or None
+        normalized_priority = max(1, min(999, int(priority or 100)))
+        if normalized_schedule_group_id:
+            if not self.schedule_group_repository:
+                raise ValueError("Schedule groups are not available")
+            group = self.schedule_group_repository.get_group(normalized_schedule_group_id)
+            if not group:
+                raise ValueError("Schedule group not found")
+        if normalized_device_platform_id and self.account_service:
+            platform = self.account_service.get_device_platform(normalized_device_platform_id)
+            if not platform or int(platform.get("device_id") or device_id) != int(device_id):
+                raise ValueError("Platform not found on this device")
+            if normalized_account_id:
+                account = self.account_service.get_account(normalized_account_id)
+                if not account or int(account.get("device_platform_id") or 0) != normalized_device_platform_id:
+                    raise ValueError("Account not found for this platform")
+        elif normalized_account_id:
+            raise ValueError("Account requires a selected platform")
+
+        validated_config = self._validate_schedule_config(normalized_schedule_type, schedule_config)
+        next_run_dt = self._compute_next_run(normalized_schedule_type, validated_config) if is_enabled else None
+        return self.schedule_repository.upsert_schedule(
+            schedule_id=schedule_id,
+            name=normalized_name,
+            workflow_id=int(workflow_id),
+            device_id=int(device_id),
+            schedule_group_id=normalized_schedule_group_id,
+            device_platform_id=normalized_device_platform_id,
+            account_id=None if use_current_account else normalized_account_id,
+            use_current_account=bool(use_current_account),
+            schedule_type=normalized_schedule_type,
+            schedule_json=json.dumps(validated_config, ensure_ascii=False, indent=2),
+            next_run_at=self._format_timestamp(next_run_dt) if next_run_dt else None,
+            priority=normalized_priority,
+            is_enabled=is_enabled,
+        )
+
+    def save_group(
+        self,
+        group_id: int | None,
+        name: str,
+        description: str,
+        is_enabled: bool = True,
+    ) -> int:
+        if not self.schedule_group_repository:
+            raise ValueError("Schedule groups are not available")
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("Group name is required")
+        duplicate = next(
+            (
+                group
+                for group in self.schedule_group_repository.list_groups()
+                if str(group.get("name") or "").strip().casefold() == normalized_name.casefold()
+                and int(group.get("id") or 0) != int(group_id or 0)
+            ),
+            None,
+        )
+        if duplicate:
+            raise ValueError("Group name already exists")
+        return self.schedule_group_repository.upsert_group(
+            group_id,
+            normalized_name,
+            str(description or "").strip(),
+            is_enabled=is_enabled,
+        )
+
+    def delete_group(self, group_id: int) -> None:
+        if not self.schedule_group_repository:
+            raise ValueError("Schedule groups are not available")
+        self.schedule_group_repository.delete_group(group_id)
+
+    def set_group_enabled(self, group_id: int, enabled: bool) -> dict[str, Any]:
+        if not self.schedule_group_repository:
+            raise ValueError("Schedule groups are not available")
+        group = self.schedule_group_repository.get_group(group_id)
+        if not group:
+            raise ValueError("Schedule group not found")
+        self.schedule_group_repository.set_group_enabled(group_id, enabled)
+        return self.schedule_group_repository.get_group(group_id) or {}
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        self.schedule_repository.delete_schedule(schedule_id)
+
+    def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> dict[str, Any]:
+        schedule = self.get_schedule(schedule_id)
+        if not schedule:
+            raise ValueError("Schedule not found")
+        config = schedule["schedule_config"]
+        next_run_dt = self._compute_next_run(str(schedule["schedule_type"]), config) if enabled else None
+        self.schedule_repository.update_schedule_state(
+            schedule_id,
+            next_run_at=self._format_timestamp(next_run_dt) if next_run_dt else None,
+            last_status="idle" if enabled else "paused",
+            is_enabled=enabled,
+        )
+        self.log_service.add(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            "INFO",
+            "schedule_resumed" if enabled else "schedule_paused",
+            f"Schedule '{schedule['name']}' {'resumed' if enabled else 'paused'}",
+            {"schedule_id": schedule_id, "schedule_name": str(schedule["name"])},
+        )
+        updated = self.get_schedule(schedule_id)
+        if not updated:
+            raise ValueError("Schedule not found after update")
+        return updated
+
+    def resolve_run_request(
+        self,
+        schedule_id: int,
+        *,
+        trigger_source: str,
+        advance_schedule: bool,
+        startup_recovery: bool,
+        is_running: bool,
+    ) -> dict[str, Any]:
+        schedule = self.get_schedule(schedule_id)
+        if not schedule:
+            return {"action": "skip", "reason": "schedule_not_found"}
+        config = schedule["schedule_config"]
+        if trigger_source != "manual" and not bool(schedule.get("is_enabled", 1)):
+            return {"action": "skip", "reason": "disabled", "schedule": schedule}
+        if trigger_source != "manual" and schedule.get("schedule_group_id") and not bool(schedule.get("group_is_enabled", 1)):
+            return {"action": "skip", "reason": "group_disabled", "schedule": schedule}
+
+        effective_trigger_source = trigger_source
+        if trigger_source == "timer" and startup_recovery:
+            missed_policy = str(config.get("missed_run_policy") or "run_immediately")
+            if missed_policy == "skip":
+                self._record_non_run(
+                    schedule,
+                    status="missed_skipped",
+                    trigger_source="missed_run",
+                    message=f"Skipped missed schedule '{schedule['name']}' on startup",
+                    advance_schedule=True,
+                )
+                return {"action": "skip", "reason": "missed_skipped", "schedule": schedule}
+            if missed_policy == "reschedule_next":
+                self._record_non_run(
+                    schedule,
+                    status="missed_rescheduled",
+                    trigger_source="missed_run",
+                    message=f"Rescheduled missed schedule '{schedule['name']}' on startup",
+                    advance_schedule=True,
+                )
+                return {"action": "skip", "reason": "missed_rescheduled", "schedule": schedule}
+            effective_trigger_source = "missed_run"
+
+        if is_running:
+            overlap_policy = str(config.get("overlap_policy") or "skip_if_running")
+            if overlap_policy == "queue_next":
+                self.log_service.add(
+                    int(schedule["workflow_id"]),
+                    int(schedule["device_id"]),
+                    "INFO",
+                    "schedule_queued",
+                    f"Queued schedule '{schedule['name']}' while previous run is still active",
+                    {"schedule_id": int(schedule["id"]), "schedule_name": str(schedule["name"]), "trigger_source": effective_trigger_source},
+                )
+                return {
+                    "action": "queue",
+                    "schedule": schedule,
+                    "trigger_source": effective_trigger_source,
+                    "advance_schedule": advance_schedule,
+                }
+            self._record_non_run(
+                schedule,
+                status="skipped_overlap",
+                trigger_source=effective_trigger_source,
+                message=f"Skipped schedule '{schedule['name']}' because a previous run is still active",
+                advance_schedule=advance_schedule,
+            )
+            return {"action": "skip", "reason": "overlap", "schedule": schedule}
+
+        return {
+            "action": "run",
+            "schedule": schedule,
+            "trigger_source": effective_trigger_source,
+            "advance_schedule": advance_schedule,
+        }
+
+    def dashboard_snapshot(
+        self,
+        *,
+        running_schedule_ids: set[int] | None = None,
+        queued_schedule_ids: set[int] | None = None,
+        next_limit: int = 5,
+        failure_limit: int = 5,
+    ) -> dict[str, Any]:
+        schedules = self.list_schedules()
+        running_ids = {int(schedule_id) for schedule_id in (running_schedule_ids or set())}
+        queued_ids = {int(schedule_id) for schedule_id in (queued_schedule_ids or set())}
+        due_now = self.list_due_schedules()
+        due_id_set = {int(schedule["id"]) for schedule in due_now}
+
+        running_rows = [schedule for schedule in schedules if int(schedule["id"]) in running_ids]
+        queued_rows = [schedule for schedule in schedules if int(schedule["id"]) in queued_ids]
+        next_runs = sorted(
+            [schedule for schedule in schedules if schedule.get("next_run_at")],
+            key=lambda item: (str(item.get("next_run_at") or ""), int(item.get("priority") or 100), int(item["id"])),
+        )[: max(1, int(next_limit))]
+        recent_failures = self.schedule_run_repository.list_recent_failed_runs(limit=max(1, int(failure_limit)))
+
+        group_rows: list[dict[str, Any]] = []
+        groups_by_id = {int(group["id"]): dict(group) for group in self.list_groups()}
+        for group_id, group in groups_by_id.items():
+            members = [schedule for schedule in schedules if int(schedule.get("schedule_group_id") or 0) == group_id]
+            group_rows.append(
+                {
+                    **group,
+                    "running_count": sum(1 for schedule in members if int(schedule["id"]) in running_ids),
+                    "queued_count": sum(1 for schedule in members if int(schedule["id"]) in queued_ids),
+                    "due_count": sum(1 for schedule in members if int(schedule["id"]) in due_id_set),
+                }
+            )
+        group_rows.sort(key=lambda item: (str(item.get("name") or "").casefold(), int(item.get("id") or 0)))
+
+        return {
+            "counts": {
+                "total": len(schedules),
+                "enabled": sum(1 for schedule in schedules if bool(schedule.get("is_enabled", 1))),
+                "paused": sum(1 for schedule in schedules if not bool(schedule.get("is_enabled", 1))),
+                "running": len(running_rows),
+                "queued": len(queued_rows),
+                "due_now": len(due_now),
+                "groups": len(group_rows),
+            },
+            "running": running_rows,
+            "queued": queued_rows,
+            "next_runs": next_runs,
+            "recent_failures": recent_failures,
+            "groups": group_rows,
+        }
+
+    def execute_schedule(
+        self,
+        schedule_id: int,
+        *,
+        trigger_source: str = "manual",
+        advance_schedule: bool = False,
+    ) -> dict[str, Any]:
+        schedule = self.get_schedule(schedule_id)
+        if not schedule:
+            return {"success": False, "message": "Schedule not found"}
+        if not bool(schedule.get("is_enabled", 1)) and trigger_source != "manual":
+            return {"success": False, "message": "Schedule is disabled"}
+
+        config = schedule["schedule_config"]
+        started_at_dt = datetime.now().astimezone()
+        started_at = self._format_timestamp(started_at_dt)
+        self.log_service.add(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            "INFO",
+            "schedule_started",
+            f"Started schedule '{schedule['name']}'",
+            {"schedule_id": int(schedule["id"]), "schedule_name": str(schedule["name"]), "trigger_source": trigger_source},
+        )
+
+        retry_limit = int(config.get("retry_on_failure") or 0)
+        retry_delay_seconds = int(config.get("retry_delay_seconds") or 0)
+        attempts = 0
+        result: dict[str, Any] = {"success": False, "message": "Schedule did not execute"}
+        while True:
+            attempts += 1
+            result = self.workflow_service.execute_workflow(
+                int(schedule["workflow_id"]),
+                int(schedule["device_id"]),
+                device_platform_id=int(schedule.get("device_platform_id") or 0) or None,
+                account_id=int(schedule.get("account_id") or 0) or None,
+                use_current_account=bool(schedule.get("use_current_account", 0)),
+            )
+            if bool(result.get("success")) or attempts > retry_limit:
+                break
+            self.log_service.add(
+                int(schedule["workflow_id"]),
+                int(schedule["device_id"]),
+                "WARNING",
+                "schedule_retry",
+                f"Retrying schedule '{schedule['name']}' after failure",
+                {
+                    "schedule_id": int(schedule["id"]),
+                    "schedule_name": str(schedule["name"]),
+                    "trigger_source": trigger_source,
+                    "attempt": attempts,
+                    "retry_limit": retry_limit,
+                    "retry_delay_seconds": retry_delay_seconds,
+                },
+            )
+            if retry_delay_seconds > 0:
+                time.sleep(retry_delay_seconds)
+
+        finished_at_dt = datetime.now().astimezone()
+        finished_at = self._format_timestamp(finished_at_dt)
+        was_successful = bool(result.get("success"))
+        run_status = "success" if was_successful else "failed"
+        next_run_at = schedule.get("next_run_at")
+        schedule_enabled = bool(schedule.get("is_enabled", 1))
+
+        if advance_schedule:
+            computed_next_run = self._compute_next_run(
+                str(schedule.get("schedule_type") or ""),
+                config,
+                reference=finished_at_dt,
+            )
+            if str(schedule.get("schedule_type") or "") == "once":
+                schedule_enabled = False
+                next_run_at = None
+            else:
+                next_run_at = self._format_timestamp(computed_next_run) if computed_next_run else None
+
+        self.schedule_repository.update_schedule_state(
+            int(schedule["id"]),
+            next_run_at=next_run_at,
+            last_run_at=finished_at,
+            last_status=run_status,
+            is_enabled=schedule_enabled,
+        )
+        self.schedule_run_repository.add_run(
+            schedule_id=int(schedule["id"]),
+            workflow_id=int(schedule["workflow_id"]),
+            device_id=int(schedule["device_id"]),
+            trigger_source=str(trigger_source),
+            status=run_status,
+            message=str(result.get("message") or ""),
+            metadata={
+                "schedule_name": str(schedule["name"]),
+                "advance_schedule": bool(advance_schedule),
+                "attempts": attempts,
+                "retry_limit": retry_limit,
+                "next_run_at": next_run_at,
+            },
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        self.log_service.add(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            "INFO" if was_successful else "ERROR",
+            "schedule_success" if was_successful else "schedule_failed",
+            f"Schedule '{schedule['name']}' {'completed' if was_successful else 'failed'}",
+            {
+                "schedule_id": int(schedule["id"]),
+                "schedule_name": str(schedule["name"]),
+                "trigger_source": trigger_source,
+                "attempts": attempts,
+                "next_run_at": next_run_at,
+                "result_message": str(result.get("message") or ""),
+            },
+        )
+        return {
+            "success": was_successful,
+            "message": str(result.get("message") or ""),
+            "schedule_id": int(schedule["id"]),
+            "schedule_name": str(schedule["name"]),
+            "run_status": run_status,
+            "trigger_source": trigger_source,
+            "attempts": attempts,
+            "next_run_at": next_run_at,
+        }
+
+    def describe_schedule(self, schedule_type: str, schedule_config: dict[str, Any]) -> str:
+        normalized_schedule_type = str(schedule_type or "").strip().lower()
+        if normalized_schedule_type == "once":
+            summary = f"Once at {schedule_config.get('run_at', '-')}"
+        elif normalized_schedule_type == "interval":
+            minutes = int(schedule_config.get("every_minutes") or 0)
+            summary = f"Every {minutes} minute{'s' if minutes != 1 else ''}"
+        elif normalized_schedule_type == "daily":
+            summary = f"Daily at {schedule_config.get('time', '-')}"
+        elif normalized_schedule_type == "weekly":
+            weekdays = [self.WEEKDAY_NAMES[int(day)] for day in schedule_config.get("weekdays", []) if 0 <= int(day) <= 6]
+            summary = f"Weekly {', '.join(weekdays) or '-'} at {schedule_config.get('time', '-')}"
+        else:
+            summary = normalized_schedule_type or "-"
+        if bool(schedule_config.get("active_window_enabled")):
+            summary += f" / Window {schedule_config.get('window_start', '-')} - {schedule_config.get('window_end', '-')}"
+        jitter_seconds = int(schedule_config.get("jitter_seconds") or 0)
+        if jitter_seconds > 0:
+            summary += f" / +{jitter_seconds}s jitter"
+        return summary
+
+    def _load_schedule_config(self, payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return dict(payload)
+        try:
+            loaded = json.loads(payload or "{}")
+        except Exception:
+            loaded = {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _validate_schedule_config(self, schedule_type: str, schedule_config: dict[str, Any]) -> dict[str, Any]:
+        config = dict(schedule_config or {})
+        validated: dict[str, Any] = {
+            "jitter_seconds": max(0, int(config.get("jitter_seconds") or 0)),
+            "missed_run_policy": str(config.get("missed_run_policy") or "run_immediately"),
+            "overlap_policy": str(config.get("overlap_policy") or "skip_if_running"),
+            "retry_on_failure": max(0, int(config.get("retry_on_failure") or 0)),
+            "retry_delay_seconds": max(0, int(config.get("retry_delay_seconds") or 0)),
+            "active_window_enabled": bool(config.get("active_window_enabled", False)),
+            "window_start": str(config.get("window_start") or "09:00"),
+            "window_end": str(config.get("window_end") or "18:00"),
+        }
+        if validated["missed_run_policy"] not in self.MISSED_RUN_POLICIES:
+            raise ValueError("Invalid missed run policy")
+        if validated["overlap_policy"] not in self.OVERLAP_POLICIES:
+            raise ValueError("Invalid overlap policy")
+        if validated["active_window_enabled"]:
+            start_minutes, end_minutes = self._parse_clock_range(validated["window_start"], validated["window_end"])
+            if end_minutes <= start_minutes:
+                raise ValueError("Active window end time must be after start time")
+
+        if schedule_type == "once":
+            run_at = str(config.get("run_at") or "").strip()
+            if not run_at:
+                raise ValueError("Run once schedule requires run_at")
+            validated["run_at"] = self._format_timestamp(self._parse_timestamp(run_at))
+            return validated
+
+        if schedule_type == "interval":
+            every_minutes = int(config.get("every_minutes") or 0)
+            if every_minutes <= 0:
+                raise ValueError("Interval schedule requires every_minutes > 0")
+            validated["every_minutes"] = every_minutes
+            return validated
+
+        time_text = str(config.get("time") or "").strip()
+        try:
+            parsed_time = datetime.strptime(time_text, "%H:%M")
+        except ValueError as exc:
+            raise ValueError(f"{schedule_type.title()} schedule requires time in HH:MM") from exc
+        validated["time"] = parsed_time.strftime("%H:%M")
+
+        if schedule_type == "weekly":
+            weekdays = sorted({int(day) for day in config.get("weekdays", []) if 0 <= int(day) <= 6})
+            if not weekdays:
+                raise ValueError("Weekly schedule requires at least one weekday")
+            validated["weekdays"] = weekdays
+
+        if validated["active_window_enabled"]:
+            start_minutes, end_minutes = self._parse_clock_range(validated["window_start"], validated["window_end"])
+            scheduled_minutes = parsed_time.hour * 60 + parsed_time.minute
+            if scheduled_minutes < start_minutes or scheduled_minutes > end_minutes:
+                raise ValueError(f"{schedule_type.title()} schedule time must be inside the active window")
+            if validated["jitter_seconds"] > max(0, (end_minutes - scheduled_minutes) * 60):
+                raise ValueError("Jitter pushes scheduled time outside the active window")
+        return validated
+
+    def _compute_next_run(
+        self,
+        schedule_type: str,
+        schedule_config: dict[str, Any],
+        *,
+        reference: datetime | None = None,
+    ) -> datetime | None:
+        now = reference or datetime.now().astimezone()
+        normalized_schedule_type = str(schedule_type or "").strip().lower()
+        if normalized_schedule_type == "once":
+            return self._parse_timestamp(str(schedule_config.get("run_at") or ""))
+        if normalized_schedule_type == "interval":
+            candidate = now + timedelta(minutes=int(schedule_config.get("every_minutes") or 0))
+            return self._adjust_to_active_window(self._apply_jitter(candidate, schedule_config), schedule_config)
+        if normalized_schedule_type == "daily":
+            candidate = self._next_daily_candidate(now, str(schedule_config.get("time") or "00:00"))
+            return self._adjust_to_active_window(self._apply_jitter(candidate, schedule_config), schedule_config)
+        if normalized_schedule_type == "weekly":
+            candidate = self._next_weekly_candidate(now, str(schedule_config.get("time") or "00:00"), list(schedule_config.get("weekdays") or []))
+            return self._adjust_to_active_window(self._apply_jitter(candidate, schedule_config), schedule_config)
+        return None
+
+    def _record_non_run(
+        self,
+        schedule: dict[str, Any],
+        *,
+        status: str,
+        trigger_source: str,
+        message: str,
+        advance_schedule: bool,
+    ) -> None:
+        now_dt = datetime.now().astimezone()
+        now_text = self._format_timestamp(now_dt)
+        config = schedule["schedule_config"]
+        schedule_type = str(schedule.get("schedule_type") or "")
+        schedule_enabled = bool(schedule.get("is_enabled", 1))
+        next_run_at = schedule.get("next_run_at")
+        if advance_schedule:
+            next_run_dt = self._compute_next_run(schedule_type, config, reference=now_dt)
+            if schedule_type == "once":
+                schedule_enabled = False
+                next_run_at = None
+            else:
+                next_run_at = self._format_timestamp(next_run_dt) if next_run_dt else None
+        self.schedule_repository.update_schedule_state(
+            int(schedule["id"]),
+            next_run_at=next_run_at,
+            last_run_at=now_text,
+            last_status=status,
+            is_enabled=schedule_enabled,
+        )
+        self.schedule_run_repository.add_run(
+            schedule_id=int(schedule["id"]),
+            workflow_id=int(schedule["workflow_id"]),
+            device_id=int(schedule["device_id"]),
+            trigger_source=trigger_source,
+            status=status,
+            message=message,
+            metadata={"schedule_name": str(schedule["name"]), "next_run_at": next_run_at},
+            started_at=now_text,
+            finished_at=now_text,
+        )
+        log_status_map = {
+            "skipped_overlap": "schedule_skipped_overlap",
+            "missed_skipped": "schedule_missed_skipped",
+            "missed_rescheduled": "schedule_missed_rescheduled",
+        }
+        self.log_service.add(
+            int(schedule["workflow_id"]),
+            int(schedule["device_id"]),
+            "WARNING",
+            log_status_map.get(status, "schedule_info"),
+            message,
+            {"schedule_id": int(schedule["id"]), "schedule_name": str(schedule["name"]), "trigger_source": trigger_source, "next_run_at": next_run_at},
+        )
+
+    def _next_daily_candidate(self, reference: datetime, time_text: str) -> datetime:
+        scheduled_time = datetime.strptime(time_text, "%H:%M")
+        candidate = reference.replace(hour=scheduled_time.hour, minute=scheduled_time.minute, second=0, microsecond=0)
+        if candidate <= reference:
+            candidate += timedelta(days=1)
+        return candidate
+
+    def _next_weekly_candidate(self, reference: datetime, time_text: str, weekdays: list[int]) -> datetime:
+        scheduled_time = datetime.strptime(time_text, "%H:%M")
+        normalized_days = sorted({int(day) for day in weekdays if 0 <= int(day) <= 6})
+        for day_offset in range(0, 14):
+            candidate_day = reference + timedelta(days=day_offset)
+            if candidate_day.weekday() not in normalized_days:
+                continue
+            candidate = candidate_day.replace(hour=scheduled_time.hour, minute=scheduled_time.minute, second=0, microsecond=0)
+            if candidate > reference:
+                return candidate
+        return reference + timedelta(days=7)
+
+    def _apply_jitter(self, candidate: datetime, schedule_config: dict[str, Any]) -> datetime:
+        jitter_seconds = int(schedule_config.get("jitter_seconds") or 0)
+        if jitter_seconds <= 0:
+            return candidate
+        return candidate + timedelta(seconds=random.randint(0, jitter_seconds))
+
+    def _adjust_to_active_window(self, candidate: datetime, schedule_config: dict[str, Any]) -> datetime:
+        if not bool(schedule_config.get("active_window_enabled", False)):
+            return candidate
+        start_minutes, end_minutes = self._parse_clock_range(
+            str(schedule_config.get("window_start") or "09:00"),
+            str(schedule_config.get("window_end") or "18:00"),
+        )
+        candidate_minutes = candidate.hour * 60 + candidate.minute
+        if candidate_minutes < start_minutes:
+            return candidate.replace(hour=start_minutes // 60, minute=start_minutes % 60, second=0, microsecond=0)
+        if candidate_minutes > end_minutes:
+            next_day = candidate + timedelta(days=1)
+            return next_day.replace(hour=start_minutes // 60, minute=start_minutes % 60, second=0, microsecond=0)
+        return candidate
+
+    def _parse_clock_range(self, start_text: str, end_text: str) -> tuple[int, int]:
+        start_time = datetime.strptime(start_text, "%H:%M")
+        end_time = datetime.strptime(end_text, "%H:%M")
+        return start_time.hour * 60 + start_time.minute, end_time.hour * 60 + end_time.minute
+
+    def _parse_timestamp(self, value: str) -> datetime:
+        timezone = datetime.now().astimezone().tzinfo
+        for fmt in (self.TIMESTAMP_FORMAT, "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(value, fmt).replace(tzinfo=timezone)
+            except ValueError:
+                continue
+        raise ValueError("Timestamp must be in YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS format")
+
+    def _format_timestamp(self, value: datetime) -> str:
+        localized = value if value.tzinfo else value.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return localized.astimezone().strftime(self.TIMESTAMP_FORMAT)

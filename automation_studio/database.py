@@ -78,6 +78,8 @@ class DatabaseManager:
             (9, self._migration_009_accounts),
             (10, self._migration_010_account_aliases),
             (11, self._migration_011_account_identity_case_sensitive),
+            (12, self._migration_012_workflow_schedules),
+            (13, self._migration_013_schedule_groups_and_priority),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -428,3 +430,95 @@ class DatabaseManager:
                 SET alias_normalized = LTRIM(TRIM(alias_name), '@')
                 """
             )
+
+    def _migration_012_workflow_schedules(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                workflow_id INTEGER NOT NULL,
+                device_id INTEGER NOT NULL,
+                device_platform_id INTEGER,
+                account_id INTEGER,
+                use_current_account INTEGER NOT NULL DEFAULT 0,
+                schedule_type TEXT NOT NULL DEFAULT 'interval',
+                schedule_json TEXT NOT NULL DEFAULT '{}',
+                next_run_at TEXT,
+                last_run_at TEXT,
+                last_status TEXT NOT NULL DEFAULT 'idle',
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                FOREIGN KEY(device_platform_id) REFERENCES device_platforms(id) ON DELETE SET NULL,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_id INTEGER NOT NULL,
+                workflow_id INTEGER NOT NULL,
+                device_id INTEGER NOT NULL,
+                trigger_source TEXT NOT NULL DEFAULT 'timer',
+                status TEXT NOT NULL DEFAULT 'running',
+                message TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                finished_at TEXT,
+                FOREIGN KEY(schedule_id) REFERENCES workflow_schedules(id) ON DELETE CASCADE,
+                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workflow_schedules_due
+            ON workflow_schedules(is_enabled, next_run_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started
+            ON schedule_runs(schedule_id, started_at DESC, id DESC)
+            """
+        )
+
+    def _migration_013_schedule_groups_and_priority(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )
+            """
+        )
+        if not self._column_exists(connection, "workflow_schedules", "schedule_group_id"):
+            connection.execute(
+                """
+                ALTER TABLE workflow_schedules
+                ADD COLUMN schedule_group_id INTEGER
+                """
+            )
+        if not self._column_exists(connection, "workflow_schedules", "priority"):
+            connection.execute(
+                """
+                ALTER TABLE workflow_schedules
+                ADD COLUMN priority INTEGER NOT NULL DEFAULT 100
+                """
+            )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_workflow_schedules_group_priority
+            ON workflow_schedules(schedule_group_id, is_enabled, next_run_at, priority, id)
+            """
+        )
