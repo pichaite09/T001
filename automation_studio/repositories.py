@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Any
 
 from automation_studio.database import DatabaseManager
@@ -1254,6 +1256,30 @@ class UploadRepository:
         with self.db.connection() as connection:
             connection.execute("DELETE FROM upload_jobs WHERE id = ?", (upload_job_id,))
 
+    def mark_upload_queued(self, upload_job_id: int) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE upload_jobs
+                SET status = 'queued', last_error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, upload_job_id),
+            )
+
+    def set_upload_status(self, upload_job_id: int, status: str, *, last_error: str = "") -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE upload_jobs
+                SET status = ?, last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (str(status or "draft"), str(last_error or ""), timestamp, upload_job_id),
+            )
+
     def mark_upload_started(self, upload_job_id: int) -> None:
         timestamp = self.db.local_timestamp()
         with self.db.connection() as connection:
@@ -1295,6 +1321,83 @@ class UploadRepository:
                 WHERE id = ?
                 """,
                 (status, last_error, result_json, timestamp, timestamp, upload_job_id),
+            )
+
+    def is_upload_job_busy(self, upload_job_id: int) -> bool:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT status FROM upload_jobs WHERE id = ?",
+                (upload_job_id,),
+            ).fetchone()
+        if not row:
+            return False
+        return str(row["status"] or "") in {"queued", "running"}
+
+    def try_acquire_upload_execution(
+        self,
+        upload_job_id: int,
+        device_id: int,
+        *,
+        owner_id: str,
+        lease_seconds: int = 3600,
+    ) -> tuple[bool, str]:
+        now = self.db.local_timestamp()
+        expires_at = (datetime.now().astimezone() + timedelta(seconds=max(int(lease_seconds), 60))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        lock_rows = [
+            (
+                f"upload_job:{int(upload_job_id)}",
+                "upload_execution",
+                "upload_job",
+                int(upload_job_id),
+                owner_id,
+                now,
+                expires_at,
+                json.dumps({"upload_job_id": int(upload_job_id)}, ensure_ascii=False),
+            ),
+            (
+                f"device:{int(device_id)}:upload_execution",
+                "upload_execution",
+                "device",
+                int(device_id),
+                owner_id,
+                now,
+                expires_at,
+                json.dumps({"device_id": int(device_id)}, ensure_ascii=False),
+            ),
+        ]
+        try:
+            with self.db.connection() as connection:
+                connection.execute("DELETE FROM runtime_locks WHERE expires_at <= ?", (now,))
+                for row in lock_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO runtime_locks (
+                            lock_key, lock_group, resource_type, resource_id,
+                            owner_id, acquired_at, expires_at, metadata_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        row,
+                    )
+        except sqlite3.IntegrityError:
+            return False, "Upload job or device is already busy"
+        return True, ""
+
+    def release_upload_execution(self, upload_job_id: int, device_id: int, *, owner_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                DELETE FROM runtime_locks
+                WHERE owner_id = ?
+                  AND lock_key IN (?, ?)
+                """,
+                (
+                    owner_id,
+                    f"upload_job:{int(upload_job_id)}",
+                    f"device:{int(device_id)}:upload_execution",
+                ),
             )
 
     def list_upload_templates(self) -> list[dict[str, Any]]:

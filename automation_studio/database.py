@@ -83,6 +83,7 @@ class DatabaseManager:
             (14, self._migration_014_device_runtime_info),
             (15, self._migration_015_upload_jobs),
             (16, self._migration_016_upload_templates_and_fields),
+            (17, self._migration_017_runtime_locks),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -606,5 +607,27 @@ class DatabaseManager:
                 FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
                 FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE SET NULL
             )
+            """
+        )
+
+    def _migration_017_runtime_locks(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_locks (
+                lock_key TEXT PRIMARY KEY,
+                lock_group TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id INTEGER,
+                owner_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                expires_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_runtime_locks_group_resource
+            ON runtime_locks(lock_group, resource_type, resource_id)
             """
         )

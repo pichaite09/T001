@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import random
 import re
+import threading
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -1019,89 +1021,118 @@ class UploadService:
         self.upload_repository.delete_upload_template(template_id)
 
     def delete_upload_job(self, upload_job_id: int) -> None:
+        if self.upload_repository.is_upload_job_busy(upload_job_id):
+            raise ValueError("Upload job is queued or running")
         self.upload_repository.delete_upload_job(upload_job_id)
 
-    def execute_upload_job(self, upload_job_id: int) -> dict[str, Any]:
+    def mark_upload_job_queued(self, upload_job_id: int) -> None:
+        upload_job = self.upload_repository.get_upload_job(upload_job_id)
+        if not upload_job:
+            raise ValueError("Upload job not found")
+        if self.upload_repository.is_upload_job_busy(upload_job_id):
+            raise ValueError("Upload job is already queued or running")
+        self.upload_repository.mark_upload_queued(upload_job_id)
+
+    def execute_upload_job(self, upload_job_id: int, *, lock_owner_id: str | None = None) -> dict[str, Any]:
         if not self.workflow_service:
             raise RuntimeError("Workflow service is not available")
         upload_job = self.upload_repository.get_upload_job(upload_job_id)
         if not upload_job:
             return {"success": False, "message": "Upload job not found"}
 
+        owner_id = str(
+            lock_owner_id
+            or f"upload-run:{os.getpid()}:{threading.get_ident()}:{upload_job_id}:{int(time.time() * 1000)}"
+        )
+        acquired, acquire_message = self.upload_repository.try_acquire_upload_execution(
+            upload_job_id,
+            int(upload_job["device_id"]),
+            owner_id=owner_id,
+        )
+        if not acquired:
+            return {"success": False, "message": acquire_message, "busy": True}
+
         self.upload_repository.mark_upload_started(upload_job_id)
         upload_context = self._build_upload_context(upload_job)
-        self.workflow_service.log_service.add(
-            int(upload_job["workflow_id"]),
-            int(upload_job["device_id"]),
-            "INFO",
-            "upload_started",
-            f"Started upload job #{upload_job_id}",
-            {
+        try:
+            self.workflow_service.log_service.add(
+                int(upload_job["workflow_id"]),
+                int(upload_job["device_id"]),
+                "INFO",
+                "upload_started",
+                f"Started upload job #{upload_job_id}",
+                {
+                    "upload_job_id": upload_context["id"],
+                    "upload_code_product": upload_context["code_product"],
+                    "upload_title": upload_context["title"],
+                    "upload_video_url": upload_context["video_url"],
+                },
+            )
+            extra_context = {
+                "upload": upload_context,
+                "vars": {
+                    "upload_job_id": upload_context["id"],
+                    "upload_code_product": upload_context["code_product"],
+                    "upload_link_product": upload_context["link_product"],
+                    "upload_title": upload_context["title"],
+                    "upload_description": upload_context["description"],
+                    "upload_tags": upload_context["tags"],
+                    "upload_video_url": upload_context["video_url"],
+                    "upload_cover_url": upload_context["cover_url"],
+                    "upload_local_video_path": upload_context["local_video_path"],
+                    "upload_device_video_path": upload_context["device_video_path"],
+                    "upload_metadata": upload_context["metadata"],
+                },
+            }
+            extra_metadata = {
                 "upload_job_id": upload_context["id"],
                 "upload_code_product": upload_context["code_product"],
                 "upload_title": upload_context["title"],
                 "upload_video_url": upload_context["video_url"],
-            },
-        )
-        extra_context = {
-            "upload": upload_context,
-            "vars": {
-                "upload_job_id": upload_context["id"],
-                "upload_code_product": upload_context["code_product"],
-                "upload_link_product": upload_context["link_product"],
-                "upload_title": upload_context["title"],
-                "upload_description": upload_context["description"],
-                "upload_tags": upload_context["tags"],
-                "upload_video_url": upload_context["video_url"],
-                "upload_cover_url": upload_context["cover_url"],
                 "upload_local_video_path": upload_context["local_video_path"],
-                "upload_device_video_path": upload_context["device_video_path"],
-                "upload_metadata": upload_context["metadata"],
-            },
-        }
-        extra_metadata = {
-            "upload_job_id": upload_context["id"],
-            "upload_code_product": upload_context["code_product"],
-            "upload_title": upload_context["title"],
-            "upload_video_url": upload_context["video_url"],
-            "upload_local_video_path": upload_context["local_video_path"],
-        }
-        result = self.workflow_service.execute_workflow(
-            int(upload_job["workflow_id"]),
-            int(upload_job["device_id"]),
-            device_platform_id=int(upload_job.get("device_platform_id") or 0) or None,
-            account_id=int(upload_job.get("account_id") or 0) or None,
-            extra_context=extra_context,
-            extra_metadata=extra_metadata,
-        )
-        updated_local_video_path = str(upload_context.get("local_video_path") or "").strip()
-        self.upload_repository.update_upload_local_video_path(upload_job_id, updated_local_video_path)
-        final_status = "success" if bool(result.get("success")) else "failed"
-        self.upload_repository.mark_upload_finished(
-            upload_job_id,
-            status=final_status,
-            last_error="" if result.get("success") else str(result.get("message") or ""),
-            result_json=json.dumps(result, ensure_ascii=False),
-        )
-        self.workflow_service.log_service.add(
-            int(upload_job["workflow_id"]),
-            int(upload_job["device_id"]),
-            "INFO" if result.get("success") else "ERROR",
-            "upload_success" if result.get("success") else "upload_failed",
-            (
-                f"Upload job #{upload_job_id} completed"
-                if result.get("success")
-                else f"Upload job #{upload_job_id} failed: {result.get('message') or '-'}"
-            ),
-            {
-                "upload_job_id": upload_context["id"],
-                "upload_code_product": upload_context["code_product"],
-                "upload_title": upload_context["title"],
-                "upload_video_url": upload_context["video_url"],
-                "result": result,
-            },
-        )
-        return result
+            }
+            result = self.workflow_service.execute_workflow(
+                int(upload_job["workflow_id"]),
+                int(upload_job["device_id"]),
+                device_platform_id=int(upload_job.get("device_platform_id") or 0) or None,
+                account_id=int(upload_job.get("account_id") or 0) or None,
+                extra_context=extra_context,
+                extra_metadata=extra_metadata,
+            )
+            updated_local_video_path = str(upload_context.get("local_video_path") or "").strip()
+            self.upload_repository.update_upload_local_video_path(upload_job_id, updated_local_video_path)
+            final_status = "success" if bool(result.get("success")) else "failed"
+            self.upload_repository.mark_upload_finished(
+                upload_job_id,
+                status=final_status,
+                last_error="" if result.get("success") else str(result.get("message") or ""),
+                result_json=json.dumps(result, ensure_ascii=False),
+            )
+            self.workflow_service.log_service.add(
+                int(upload_job["workflow_id"]),
+                int(upload_job["device_id"]),
+                "INFO" if result.get("success") else "ERROR",
+                "upload_success" if result.get("success") else "upload_failed",
+                (
+                    f"Upload job #{upload_job_id} completed"
+                    if result.get("success")
+                    else f"Upload job #{upload_job_id} failed: {result.get('message') or '-'}"
+                ),
+                {
+                    "upload_job_id": upload_context["id"],
+                    "upload_code_product": upload_context["code_product"],
+                    "upload_title": upload_context["title"],
+                    "upload_video_url": upload_context["video_url"],
+                    "result": result,
+                },
+            )
+            return result
+        finally:
+            self.upload_repository.release_upload_execution(
+                upload_job_id,
+                int(upload_job["device_id"]),
+                owner_id=owner_id,
+            )
 
     def execute_upload_jobs(
         self,
@@ -1195,6 +1226,7 @@ class UploadService:
         return {
             "total_jobs": len(jobs),
             "draft_count": status_counter.get("draft", 0),
+            "queued_count": status_counter.get("queued", 0),
             "running_count": status_counter.get("running", 0),
             "success_count": status_counter.get("success", 0),
             "failed_count": status_counter.get("failed", 0),

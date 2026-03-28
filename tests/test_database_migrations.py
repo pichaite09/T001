@@ -15,7 +15,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             db = DatabaseManager(db_path)
             db.init_schema()
 
-            self.assertEqual(db.current_schema_version(), 16)
+            self.assertEqual(db.current_schema_version(), 17)
 
             with db.connection() as connection:
                 device_columns = {
@@ -73,6 +73,10 @@ class DatabaseMigrationTests(unittest.TestCase):
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(upload_templates)").fetchall()
                 }
+                runtime_lock_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(runtime_locks)").fetchall()
+                }
 
             self.assertIn("last_info_json", device_columns)
             self.assertIn("definition_version", workflow_columns)
@@ -91,6 +95,9 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("result_json", upload_columns)
             self.assertIn("description_template", upload_template_columns)
             self.assertIn("metadata_json", upload_template_columns)
+            self.assertIn("lock_key", runtime_lock_columns)
+            self.assertIn("owner_id", runtime_lock_columns)
+            self.assertIn("expires_at", runtime_lock_columns)
             self.assertTrue(telemetry_tables)
             self.assertEqual(len(watcher_tables), 11)
         finally:

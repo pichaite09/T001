@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,12 @@ class UploadApiApplication:
         self.upload_service = upload_service
         self.api_key = str(api_key or "").strip()
         self._run_lock = threading.Lock()
+        self._queue_lock = threading.Lock()
+        self._queued_upload_job_ids: set[int] = set()
+        self._task_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._worker_stop = threading.Event()
+        self._worker_thread = threading.Thread(target=self._worker_loop, name="upload-api-worker", daemon=True)
+        self._worker_thread.start()
 
     def authorize(self, headers) -> tuple[bool, str]:
         if not self.api_key:
@@ -124,17 +132,10 @@ class UploadApiApplication:
             if not isinstance(upload_job_ids, list) or not upload_job_ids:
                 raise ValueError("upload_job_ids must be a non-empty list")
             continue_on_error = bool(payload.get("continue_on_error", True))
-            with self._run_lock:
-                result = self.upload_service.execute_upload_jobs(
-                    [int(upload_job_id) for upload_job_id in upload_job_ids],
-                    continue_on_error=continue_on_error,
-                )
-            refreshed_items = []
-            for upload_job_id in upload_job_ids:
-                item = self.upload_service.get_upload_job(int(upload_job_id) or 0)
-                if item:
-                    refreshed_items.append(self._serialize_upload_job(item))
-            return 200, {"success": True, "result": result, "items": refreshed_items}
+            return self._enqueue_upload_jobs(
+                [int(upload_job_id) for upload_job_id in upload_job_ids],
+                continue_on_error=continue_on_error,
+            )
 
         if path == "/api/uploads/export" and method == "POST":
             payload = self._require_json_object(body_text)
@@ -220,20 +221,10 @@ class UploadApiApplication:
                 return 200, {"success": True, "deleted_id": upload_job_id}
 
             if action == "run" and method == "POST":
-                if not self.upload_service.get_upload_job(upload_job_id):
-                    return 404, {"success": False, "message": "Upload job not found"}
-                with self._run_lock:
-                    result = self.upload_service.execute_upload_job(upload_job_id)
-                item = self.upload_service.get_upload_job(upload_job_id)
-                return 200, {"success": True, "result": result, "item": self._serialize_upload_job(item)}
+                return self._enqueue_single_upload_job(upload_job_id)
 
             if action == "retry" and method == "POST":
-                if not self.upload_service.get_upload_job(upload_job_id):
-                    return 404, {"success": False, "message": "Upload job not found"}
-                with self._run_lock:
-                    result = self.upload_service.execute_upload_job(upload_job_id)
-                item = self.upload_service.get_upload_job(upload_job_id)
-                return 200, {"success": True, "result": result, "item": self._serialize_upload_job(item)}
+                return self._enqueue_single_upload_job(upload_job_id)
 
             if action == "result" and method == "GET":
                 item = self.upload_service.get_upload_job(upload_job_id)
@@ -252,6 +243,120 @@ class UploadApiApplication:
             return 405, {"success": False, "message": "Method not allowed"}
 
         return 404, {"success": False, "message": "Not found"}
+
+    def shutdown(self) -> None:
+        self._worker_stop.set()
+        self._task_queue.put(None)
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=2)
+
+    def _enqueue_single_upload_job(self, upload_job_id: int) -> tuple[int, dict[str, Any]]:
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+        if not upload_job:
+            return 404, {"success": False, "message": "Upload job not found"}
+        with self._queue_lock:
+            if int(upload_job_id) in self._queued_upload_job_ids or str(upload_job.get("status") or "") in {"queued", "running"}:
+                return 409, {"success": False, "message": "Upload job is already queued or running"}
+            self.upload_service.mark_upload_job_queued(upload_job_id)
+            self._queued_upload_job_ids.add(int(upload_job_id))
+        queued_item = self.upload_service.get_upload_job(upload_job_id)
+        self._task_queue.put(
+            {
+                "kind": "single",
+                "upload_job_ids": [int(upload_job_id)],
+                "continue_on_error": True,
+                "task_id": f"single:{upload_job_id}:{int(time.time() * 1000)}",
+            }
+        )
+        return 202, {"success": True, "queued": True, "queued_ids": [int(upload_job_id)], "item": self._serialize_upload_job(queued_item)}
+
+    def _enqueue_upload_jobs(
+        self,
+        upload_job_ids: list[int],
+        *,
+        continue_on_error: bool,
+    ) -> tuple[int, dict[str, Any]]:
+        normalized_ids = [int(upload_job_id) for upload_job_id in upload_job_ids if int(upload_job_id) > 0]
+        jobs: list[dict[str, Any]] = []
+        with self._queue_lock:
+            for upload_job_id in normalized_ids:
+                upload_job = self.upload_service.get_upload_job(upload_job_id)
+                if not upload_job:
+                    return 404, {"success": False, "message": f"Upload job #{upload_job_id} not found"}
+                if int(upload_job_id) in self._queued_upload_job_ids or str(upload_job.get("status") or "") in {"queued", "running"}:
+                    return 409, {"success": False, "message": f"Upload job #{upload_job_id} is already queued or running"}
+                jobs.append(upload_job)
+            for upload_job_id in normalized_ids:
+                self.upload_service.mark_upload_job_queued(upload_job_id)
+                self._queued_upload_job_ids.add(int(upload_job_id))
+        self._task_queue.put(
+            {
+                "kind": "batch",
+                "upload_job_ids": normalized_ids,
+                "continue_on_error": bool(continue_on_error),
+                "task_id": f"batch:{int(time.time() * 1000)}",
+            }
+        )
+        items = []
+        for upload_job_id in normalized_ids:
+            item = self.upload_service.get_upload_job(upload_job_id)
+            if item:
+                items.append(self._serialize_upload_job(item))
+        return 202, {
+            "success": True,
+            "queued": True,
+            "queued_ids": normalized_ids,
+            "continue_on_error": bool(continue_on_error),
+            "items": items,
+        }
+
+    def _worker_loop(self) -> None:
+        while not self._worker_stop.is_set():
+            try:
+                task = self._task_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if task is None:
+                break
+            try:
+                self._process_task(task)
+            finally:
+                self._task_queue.task_done()
+
+    def _process_task(self, task: dict[str, Any]) -> None:
+        upload_job_ids = [int(upload_job_id) for upload_job_id in task.get("upload_job_ids") or [] if int(upload_job_id) > 0]
+        continue_on_error = bool(task.get("continue_on_error", True))
+        task_id = str(task.get("task_id") or f"task:{int(time.time() * 1000)}")
+        for index, upload_job_id in enumerate(upload_job_ids):
+            result = self._run_queued_upload_job(upload_job_id, owner_id=f"{task_id}:{upload_job_id}")
+            with self._queue_lock:
+                self._queued_upload_job_ids.discard(int(upload_job_id))
+            if not result.get("success") and not continue_on_error:
+                for remaining_id in upload_job_ids[index + 1 :]:
+                    self.upload_service.upload_repository.set_upload_status(
+                        int(remaining_id),
+                        "draft",
+                        last_error="Skipped because an earlier batch upload failed",
+                    )
+                    with self._queue_lock:
+                        self._queued_upload_job_ids.discard(int(remaining_id))
+                break
+
+    def _run_queued_upload_job(self, upload_job_id: int, *, owner_id: str) -> dict[str, Any]:
+        deadline = time.time() + 600.0
+        while time.time() < deadline and not self._worker_stop.is_set():
+            with self._run_lock:
+                result = self.upload_service.execute_upload_job(upload_job_id, lock_owner_id=owner_id)
+            if not result.get("busy"):
+                return result
+            time.sleep(1.0)
+        timeout_result = {"success": False, "message": "Timed out waiting for upload execution lock", "busy": True}
+        self.upload_service.upload_repository.set_upload_status(
+            upload_job_id,
+            "draft",
+            last_error=str(timeout_result["message"]),
+        )
+        return timeout_result
 
     def _save_upload_job(self, upload_job_id: int | None, payload: dict[str, Any]) -> int:
         tags_value = payload.get("tags", payload.get("tags_text", ""))
@@ -582,6 +687,11 @@ def create_api_application(
 
 
 def create_http_server(app: UploadApiApplication, host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
+    class UploadApiServer(ThreadingHTTPServer):
+        def server_close(self) -> None:
+            app.shutdown()
+            super().server_close()
+
     class UploadApiHandler(BaseHTTPRequestHandler):
         server_version = "AutomationStudioUploadAPI/1.0"
 
@@ -617,7 +727,7 @@ def create_http_server(app: UploadApiApplication, host: str = "127.0.0.1", port:
             self.end_headers()
             self.wfile.write(response)
 
-    return ThreadingHTTPServer((host, int(port)), UploadApiHandler)
+    return UploadApiServer((host, int(port)), UploadApiHandler)
 
 
 def run_api_server(

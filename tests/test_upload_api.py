@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -87,6 +88,18 @@ class UploadApiTests(unittest.TestCase):
         with urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
+    def _wait_for_upload_status(self, upload_job_id: int, expected_status: str, *, timeout: float = 5.0) -> dict:
+        deadline = time.time() + timeout
+        last_item: dict = {}
+        while time.time() < deadline:
+            status, payload = self._request("GET", f"/api/uploads/{upload_job_id}")
+            self.assertEqual(status, 200)
+            last_item = payload["item"]
+            if str(last_item.get("status") or "") == expected_status:
+                return last_item
+            time.sleep(0.1)
+        self.fail(f"Upload job #{upload_job_id} did not reach status '{expected_status}'. Last item: {last_item!r}")
+
     def test_create_list_get_and_run_upload_job_via_api(self) -> None:
         create_payload = {
             "device_id": self.device_id,
@@ -116,10 +129,11 @@ class UploadApiTests(unittest.TestCase):
         self.assertEqual(job["item"]["title"], "Upload From API")
 
         status, run_result = self._request("POST", f"/api/uploads/{upload_job_id}/run", {})
-        self.assertEqual(status, 200)
-        self.assertTrue(run_result["result"]["success"])
+        self.assertEqual(status, 202)
+        self.assertTrue(run_result["queued"])
+        finished_item = self._wait_for_upload_status(upload_job_id, "success")
         self.assertEqual(self.fake_device.actions, [("shell", "echo Upload From API")])
-        self.assertEqual(run_result["item"]["status"], "success")
+        self.assertEqual(finished_item["status"], "success")
 
     def test_reference_endpoints_return_devices_and_workflows(self) -> None:
         status, devices = self._request("GET", "/api/devices")
@@ -203,10 +217,11 @@ class UploadApiTests(unittest.TestCase):
             "/api/uploads/run-batch",
             {"upload_job_ids": upload_job_ids, "continue_on_error": True},
         )
-        self.assertEqual(status, 200)
-        self.assertTrue(batch["result"]["success"])
-        self.assertEqual(batch["result"]["success_count"], 2)
+        self.assertEqual(status, 202)
+        self.assertTrue(batch["queued"])
         self.assertEqual(len(batch["items"]), 2)
+        for upload_job_id in upload_job_ids:
+            self._wait_for_upload_status(upload_job_id, "success")
 
         status, exported = self._request("POST", "/api/uploads/export", {"upload_job_ids": [upload_job_ids[0]]})
         self.assertEqual(status, 200)
@@ -280,12 +295,14 @@ class UploadApiTests(unittest.TestCase):
         upload_job_id = int(created["item"]["id"])
 
         status, first_run = self._request("POST", f"/api/uploads/{upload_job_id}/run", {})
-        self.assertEqual(status, 200)
-        self.assertTrue(first_run["result"]["success"])
+        self.assertEqual(status, 202)
+        self.assertTrue(first_run["queued"])
+        self._wait_for_upload_status(upload_job_id, "success")
 
         status, retry_run = self._request("POST", f"/api/uploads/{upload_job_id}/retry", {})
-        self.assertEqual(status, 200)
-        self.assertTrue(retry_run["result"]["success"])
+        self.assertEqual(status, 202)
+        self.assertTrue(retry_run["queued"])
+        self._wait_for_upload_status(upload_job_id, "success")
         self.assertEqual(self.fake_device.actions, [("shell", "echo Retry Upload"), ("shell", "echo Retry Upload")])
 
         status, result_payload = self._request("GET", f"/api/uploads/{upload_job_id}/result")
@@ -320,6 +337,34 @@ class UploadApiTests(unittest.TestCase):
         finally:
             protected_server.shutdown()
             protected_server.server_close()
+
+    def test_second_run_request_is_rejected_while_job_is_queued_or_running(self) -> None:
+        status, created = self._request(
+            "POST",
+            "/api/uploads",
+            {
+                "device_id": self.device_id,
+                "workflow_id": self.workflow_id,
+                "code_product": "SKU-QUEUE",
+                "link_product": "https://example.com/queue",
+                "title": "Queue Upload",
+                "description": "Queue me",
+                "tags": ["#queue"],
+                "video_url": "https://cdn.example.com/queue.mp4",
+            },
+        )
+        self.assertEqual(status, 201)
+        upload_job_id = int(created["item"]["id"])
+
+        status, queued = self._request("POST", f"/api/uploads/{upload_job_id}/run", {})
+        self.assertEqual(status, 202)
+        self.assertTrue(queued["queued"])
+
+        with self.assertRaises(HTTPError) as ctx:
+            self._request("POST", f"/api/uploads/{upload_job_id}/run", {})
+        self.assertEqual(ctx.exception.code, 409)
+
+        self._wait_for_upload_status(upload_job_id, "success")
 
 
 if __name__ == "__main__":
