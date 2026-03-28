@@ -73,10 +73,10 @@ class DevicesPage(QtWidgets.QWidget):
                 ("wireless", "Wireless ADB"),
             )
         ):
-            card = QtWidgets.QFrame()
-            card.setProperty("panel", True)
+            card = CardFrame()
             card_layout = QtWidgets.QVBoxLayout(card)
             card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(4)
             label = QtWidgets.QLabel(label_text)
             label.setObjectName("subtitleLabel")
             value = QtWidgets.QLabel("0")
