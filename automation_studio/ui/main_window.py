@@ -126,8 +126,8 @@ class MainWindow(QtWidgets.QMainWindow):
         nav = QtWidgets.QFrame()
         nav.setProperty("navigation", True)
         nav_layout = QtWidgets.QVBoxLayout(nav)
-        nav_layout.setContentsMargins(18, 24, 18, 24)
-        nav_layout.setSpacing(14)
+        nav_layout.setContentsMargins(14, 18, 14, 18)
+        nav_layout.setSpacing(10)
 
         brand = QtWidgets.QLabel("Automation\nStudio")
         brand.setObjectName("titleLabel")
@@ -139,19 +139,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nav_list.setCurrentRow(0)
         nav_layout.addWidget(self.nav_list, 1)
 
-        self.open_screen_wall_button = make_button("Open Screen Wall")
+        self.open_screen_wall_button = make_button("Screen Wall")
         self.open_screen_wall_button.setMinimumHeight(36)
         nav_layout.addWidget(self.open_screen_wall_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
 
-        footer = QtWidgets.QLabel("PySide6 + uiautomator2 + sqlite")
+        footer = QtWidgets.QLabel("PySide6\nuiautomator2\nsqlite")
         footer.setObjectName("subtitleLabel")
+        footer.setWordWrap(True)
         footer.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignBottom)
         nav_layout.addWidget(footer)
         layout.addWidget(nav)
 
         content = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content)
-        content_layout.setContentsMargins(24, 24, 24, 24)
+        content_layout.setContentsMargins(16, 16, 16, 16)
         content_layout.setSpacing(0)
 
         self.stack = QtWidgets.QStackedWidget()

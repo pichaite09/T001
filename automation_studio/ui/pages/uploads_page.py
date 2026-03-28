@@ -128,27 +128,36 @@ class UploadsPage(QtWidgets.QWidget):
         left_layout.setSpacing(10)
 
         template_card = CardFrame()
-        template_layout = QtWidgets.QHBoxLayout(template_card)
+        template_layout = QtWidgets.QVBoxLayout(template_card)
         template_layout.setContentsMargins(14, 12, 14, 12)
-        template_layout.setSpacing(10)
+        template_layout.setSpacing(8)
+        template_row = QtWidgets.QHBoxLayout()
+        template_row.setSpacing(10)
         template_label = QtWidgets.QLabel("Upload Template")
         template_label.setObjectName("subtitleLabel")
         self.template_combo = QtWidgets.QComboBox()
-        self.template_combo.setMinimumWidth(240)
+        self.template_combo.setMinimumWidth(160)
         self.apply_template_button = make_button("Apply Template", "secondary")
         self.save_template_button = make_button("Save Template", "secondary")
         self.delete_template_button = make_button("Delete Template", "danger")
-        template_layout.addWidget(template_label)
-        template_layout.addWidget(self.template_combo, 1)
-        template_layout.addWidget(self.apply_template_button)
-        template_layout.addWidget(self.save_template_button)
-        template_layout.addWidget(self.delete_template_button)
+        template_row.addWidget(template_label)
+        template_row.addWidget(self.template_combo, 1)
+        template_layout.addLayout(template_row)
+        template_actions = QtWidgets.QHBoxLayout()
+        template_actions.setSpacing(10)
+        template_actions.addStretch(1)
+        template_actions.addWidget(self.apply_template_button)
+        template_actions.addWidget(self.save_template_button)
+        template_actions.addWidget(self.delete_template_button)
+        template_layout.addLayout(template_actions)
         left_layout.addWidget(template_card)
 
         auto_card = CardFrame()
-        auto_layout = QtWidgets.QHBoxLayout(auto_card)
+        auto_layout = QtWidgets.QVBoxLayout(auto_card)
         auto_layout.setContentsMargins(14, 12, 14, 12)
-        auto_layout.setSpacing(10)
+        auto_layout.setSpacing(8)
+        auto_top_row = QtWidgets.QHBoxLayout()
+        auto_top_row.setSpacing(10)
         auto_label = QtWidgets.QLabel("Auto Draft Runner")
         auto_label.setObjectName("subtitleLabel")
         self.auto_run_checkbox = QtWidgets.QCheckBox("Auto Run Draft Jobs")
@@ -160,15 +169,17 @@ class UploadsPage(QtWidgets.QWidget):
         self.auto_run_state_label = QtWidgets.QLabel("Auto runner: off")
         self.auto_run_state_label.setObjectName("subtitleLabel")
         self.auto_run_state_label.setWordWrap(True)
-        auto_layout.addWidget(auto_label)
-        auto_layout.addWidget(self.auto_run_checkbox)
-        auto_layout.addWidget(QtWidgets.QLabel("Check every"))
-        auto_layout.addWidget(self.auto_run_interval_combo)
-        auto_layout.addStretch(1)
-        auto_layout.addWidget(self.auto_run_state_label, 1)
+        auto_top_row.addWidget(auto_label)
+        auto_top_row.addWidget(self.auto_run_checkbox)
+        auto_top_row.addWidget(QtWidgets.QLabel("Check every"))
+        auto_top_row.addWidget(self.auto_run_interval_combo)
+        auto_top_row.addStretch(1)
+        auto_layout.addLayout(auto_top_row)
+        auto_layout.addWidget(self.auto_run_state_label)
         left_layout.addWidget(auto_card)
 
-        toolbar = QtWidgets.QHBoxLayout()
+        toolbar_primary = QtWidgets.QHBoxLayout()
+        toolbar_primary.setSpacing(8)
         self.new_button = make_button("New Upload", "secondary")
         self.save_button = make_button("Save Upload")
         self.run_now_button = make_button("Run Now", "secondary")
@@ -184,14 +195,22 @@ class UploadsPage(QtWidgets.QWidget):
             self.run_now_button,
             self.run_selected_button,
             self.run_all_button,
+        ):
+            toolbar_primary.addWidget(button)
+        toolbar_primary.addStretch(1)
+        left_layout.addLayout(toolbar_primary)
+
+        toolbar_secondary = QtWidgets.QHBoxLayout()
+        toolbar_secondary.setSpacing(8)
+        for button in (
             self.import_button,
             self.export_button,
             self.refresh_button,
             self.delete_button,
         ):
-            toolbar.addWidget(button)
-        toolbar.addStretch(1)
-        left_layout.addLayout(toolbar)
+            toolbar_secondary.addWidget(button)
+        toolbar_secondary.addStretch(1)
+        left_layout.addLayout(toolbar_secondary)
 
         self.upload_table = QtWidgets.QTableWidget(0, 8)
         self.upload_table.setHorizontalHeaderLabels(
@@ -212,8 +231,8 @@ class UploadsPage(QtWidgets.QWidget):
         splitter.addWidget(left_card)
 
         right_card = CardFrame()
-        right_card.setMinimumWidth(360)
-        right_card.setMaximumWidth(520)
+        right_card.setMinimumWidth(300)
+        right_card.setMaximumWidth(460)
         form_layout = QtWidgets.QVBoxLayout(right_card)
         form_layout.setContentsMargins(18, 18, 18, 18)
         form_layout.setSpacing(10)
@@ -262,7 +281,7 @@ class UploadsPage(QtWidgets.QWidget):
         splitter.addWidget(right_card)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([980, 420])
+        splitter.setSizes([900, 360])
 
         self.new_button.clicked.connect(self.clear_form)
         self.save_button.clicked.connect(self.save_upload_job)
@@ -347,7 +366,7 @@ class UploadsPage(QtWidgets.QWidget):
             ]
             for column, value in enumerate(values):
                 self.upload_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
-        self.upload_table.resizeColumnsToContents()
+        self._configure_upload_table_columns()
         if previous_id is not None:
             self._select_upload_row(previous_id)
         self._refresh_summary()
@@ -358,6 +377,18 @@ class UploadsPage(QtWidgets.QWidget):
         self.refresh_workflows()
         self.refresh_templates()
         self.load_upload_jobs()
+
+    def _configure_upload_table_columns(self) -> None:
+        header = self.upload_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.upload_table.setColumnWidth(5, 130)
 
     def _refresh_summary(self) -> None:
         summary = self.upload_service.upload_summary()

@@ -234,6 +234,7 @@ class WorkflowPage(QtWidgets.QWidget):
         subtitle.setText(
             "Phase 3 editor with presets, flow control, variables, conditional jump, and workflow JSON import/export."
         )
+        subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
@@ -279,9 +280,9 @@ class WorkflowPage(QtWidgets.QWidget):
         workflow_layout.addWidget(self.watcher_list)
 
         profile_header = QtWidgets.QHBoxLayout()
-        profile_header.addWidget(make_form_label("Attached Watcher Profiles"))
+        profile_header.addWidget(make_form_label("Watcher Profiles"))
         profile_header.addStretch(1)
-        self.manage_profiles_button = make_button("Manage Profiles", "secondary")
+        self.manage_profiles_button = make_button("Profiles", "secondary")
         profile_header.addWidget(self.manage_profiles_button)
         workflow_layout.addLayout(profile_header)
 
@@ -292,7 +293,7 @@ class WorkflowPage(QtWidgets.QWidget):
 
         workflow_layout.addWidget(make_form_label("Workflows"))
         self.workflow_list = QtWidgets.QListWidget()
-        self.workflow_list.setMinimumHeight(220)
+        self.workflow_list.setMinimumHeight(180)
         self.workflow_list.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -306,38 +307,50 @@ class WorkflowPage(QtWidgets.QWidget):
         steps_layout.setSpacing(12)
 
         top_actions = QtWidgets.QHBoxLayout()
+        top_actions.setSpacing(8)
         self.device_combo = QtWidgets.QComboBox()
         self.platform_combo = QtWidgets.QComboBox()
         self.account_combo = QtWidgets.QComboBox()
         self.device_combo.setToolTip("Select the device that will run this workflow.")
         self.platform_combo.setToolTip("Optionally inject a platform context before the workflow starts.")
         self.account_combo.setToolTip("Use a specific account or the platform's current account.")
-        self.run_step_button = make_button("Run Selected Step", "secondary")
-        self.run_button = make_button("Run Workflow")
         top_actions.addWidget(self.device_combo, 2)
         top_actions.addWidget(self.platform_combo, 1)
         top_actions.addWidget(self.account_combo, 1)
-        top_actions.addWidget(self.run_step_button)
-        top_actions.addWidget(self.run_button)
         steps_layout.addLayout(top_actions)
 
+        run_toolbar = QtWidgets.QHBoxLayout()
+        run_toolbar.setSpacing(8)
+        self.run_step_button = make_button("Run Step", "secondary")
+        self.run_button = make_button("Run")
+        run_toolbar.addWidget(self.run_step_button)
+        run_toolbar.addWidget(self.run_button)
+        run_toolbar.addStretch(1)
+        steps_layout.addLayout(run_toolbar)
+
         step_toolbar = QtWidgets.QHBoxLayout()
+        step_toolbar.setSpacing(8)
         self.add_step_button = make_button("Add Step")
         self.duplicate_step_button = make_button("Duplicate", "secondary")
-        self.toggle_step_button = make_button("Disable Selected", "secondary")
+        self.toggle_step_button = make_button("Disable", "secondary")
         self.move_up_button = make_button("Move Up", "secondary")
         self.move_down_button = make_button("Move Down", "secondary")
-        self.edit_step_button = make_button("Edit Selected", "secondary")
-        self.delete_step_button = make_button("Delete Step", "danger")
+        self.edit_step_button = make_button("Edit", "secondary")
+        self.delete_step_button = make_button("Delete", "danger")
         step_toolbar.addWidget(self.add_step_button)
         step_toolbar.addWidget(self.duplicate_step_button)
-        step_toolbar.addWidget(self.toggle_step_button)
-        step_toolbar.addWidget(self.move_up_button)
-        step_toolbar.addWidget(self.move_down_button)
         step_toolbar.addWidget(self.edit_step_button)
         step_toolbar.addWidget(self.delete_step_button)
         step_toolbar.addStretch(1)
         steps_layout.addLayout(step_toolbar)
+
+        step_toolbar_secondary = QtWidgets.QHBoxLayout()
+        step_toolbar_secondary.setSpacing(8)
+        step_toolbar_secondary.addWidget(self.toggle_step_button)
+        step_toolbar_secondary.addWidget(self.move_up_button)
+        step_toolbar_secondary.addWidget(self.move_down_button)
+        step_toolbar_secondary.addStretch(1)
+        steps_layout.addLayout(step_toolbar_secondary)
 
         self.steps_table = ReorderableStepTable()
         self.steps_table.setColumnCount(7)
@@ -346,7 +359,6 @@ class WorkflowPage(QtWidgets.QWidget):
         self.steps_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.steps_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.steps_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.steps_table.horizontalHeader().setStretchLastSection(True)
         self.steps_table.setColumnHidden(ReorderableStepTable.ID_COLUMN, True)
         self.steps_table.setAlternatingRowColors(True)
         steps_layout.addWidget(self.steps_table, 1)
@@ -593,8 +605,22 @@ class WorkflowPage(QtWidgets.QWidget):
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 self.steps_table.setItem(row_index, column, item)
         self.steps_table.clearSelection()
-        self.steps_table.resizeColumnsToContents()
+        self._configure_steps_table_columns()
         self._sync_step_actions()
+
+    def _configure_steps_table_columns(self) -> None:
+        header = self.steps_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(ReorderableStepTable.DRAG_COLUMN, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(ReorderableStepTable.POSITION_COLUMN, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.steps_table.setColumnWidth(ReorderableStepTable.DRAG_COLUMN, 52)
+        self.steps_table.setColumnWidth(ReorderableStepTable.POSITION_COLUMN, 56)
+        self.steps_table.setColumnWidth(4, 120)
+        self.steps_table.setColumnWidth(5, 90)
 
     def load_linked_watchers(self) -> None:
         self.watcher_list.clear()
@@ -677,7 +703,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.edit_step_button.setEnabled(has_step)
         self.delete_step_button.setEnabled(has_step)
         self.manage_profiles_button.setEnabled(has_workflow)
-        self.toggle_step_button.setText("Disable Selected" if has_step and step["is_enabled"] else "Enable Selected")
+        self.toggle_step_button.setText("Disable" if has_step and step["is_enabled"] else "Enable")
 
     def _persist_step_order(self, ordered_step_ids: list[int], moved_step_id: int) -> None:
         if not self.current_workflow_id or not ordered_step_ids:
