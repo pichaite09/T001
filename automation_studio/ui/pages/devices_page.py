@@ -100,11 +100,9 @@ class DevicesPage(QtWidgets.QWidget):
         self.refresh_button = make_button("Refresh", "secondary")
         self.refresh_info_button = make_button("Refresh Info", "secondary")
         self.test_button = make_button("Test Connection")
-        self.open_screen_button = make_button("Open Screen Wall")
         action_row.addWidget(self.refresh_button)
         action_row.addWidget(self.refresh_info_button)
         action_row.addWidget(self.test_button)
-        action_row.addWidget(self.open_screen_button)
         action_row.addStretch(1)
         table_layout.addLayout(action_row)
 
@@ -264,7 +262,6 @@ class DevicesPage(QtWidgets.QWidget):
         self.save_button.clicked.connect(self.save_device)
         self.delete_button.clicked.connect(self.delete_device)
         self.test_button.clicked.connect(self.test_connection)
-        self.open_screen_button.clicked.connect(self.open_screen_viewer)
         self.screenshot_button.clicked.connect(self.capture_screenshot)
         self.dump_hierarchy_button.clicked.connect(self.dump_hierarchy)
         self.open_artifacts_button.clicked.connect(self.open_artifacts_folder)
@@ -580,6 +577,9 @@ class DevicesPage(QtWidgets.QWidget):
         )
         self.open_screen_requested.emit()
 
+    def has_devices(self) -> bool:
+        return bool(self._devices)
+
     def dump_hierarchy(self) -> None:
         serial = self.serial_input.text().strip()
         if not serial:
@@ -694,7 +694,6 @@ class DevicesPage(QtWidgets.QWidget):
             self.open_artifacts_button,
         ):
             button.setEnabled(enabled)
-        self.open_screen_button.setEnabled(bool(self._devices))
 
     def _log_device_event(
         self,

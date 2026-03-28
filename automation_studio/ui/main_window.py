@@ -35,6 +35,7 @@ from automation_studio.ui.pages.schedules_page import ScheduleRunThread, Schedul
 from automation_studio.ui.pages.watchers_page import WatchersPage
 from automation_studio.ui.pages.workflow_page import WorkflowPage
 from automation_studio.ui.theme import APP_STYLESHEET
+from automation_studio.ui.widgets import make_button
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -126,6 +127,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nav_list.setCurrentRow(0)
         nav_layout.addWidget(self.nav_list, 1)
 
+        self.open_screen_wall_button = make_button("Open Screen Wall")
+        self.open_screen_wall_button.setMinimumHeight(36)
+        nav_layout.addWidget(self.open_screen_wall_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+
         footer = QtWidgets.QLabel("PySide6 + uiautomator2 + sqlite")
         footer.setObjectName("subtitleLabel")
         footer.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignBottom)
@@ -203,7 +208,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.watchers_page.watchers_changed.connect(self.workflow_page.load_linked_watchers)
         self.watchers_page.logs_changed.connect(self.log_page.load_logs)
         self.devices_page.open_screen_requested.connect(self._open_screen_viewer)
+        self.devices_page.devices_changed.connect(self._sync_screen_wall_button)
+        self.open_screen_wall_button.clicked.connect(self.devices_page.open_screen_viewer)
+        self._sync_screen_wall_button()
         self._refresh_schedule_runtime_state()
+
+    def _sync_screen_wall_button(self) -> None:
+        self.open_screen_wall_button.setEnabled(self.devices_page.has_devices())
 
     def _init_scheduler_timer(self) -> None:
         self.scheduler_timer = QtCore.QTimer(self)
