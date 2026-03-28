@@ -202,6 +202,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.watchers_page.watchers_changed.connect(self.log_page.refresh_filters)
         self.watchers_page.watchers_changed.connect(self.workflow_page.load_linked_watchers)
         self.watchers_page.logs_changed.connect(self.log_page.load_logs)
+        self.devices_page.open_screen_requested.connect(self._open_screen_viewer)
         self._refresh_schedule_runtime_state()
 
     def _init_scheduler_timer(self) -> None:
@@ -303,6 +304,21 @@ class MainWindow(QtWidgets.QMainWindow):
             set(self._schedule_runners.keys()),
             set(self._queued_schedule_runs.keys()),
         )
+
+    def _open_screen_viewer(self) -> None:
+        args = [
+            "-m",
+            "automation_studio.viewer_process",
+            "--db-path",
+            str(Path.cwd() / "automation_studio.db"),
+            "--refresh-ms",
+            "1000",
+        ]
+        started, _pid = QtCore.QProcess.startDetached(sys.executable, args, str(Path.cwd()))
+        if started:
+            self.devices_page.status_label.setText("Opened screen viewer for all devices")
+            return
+        self.devices_page.status_label.setText("Failed to open screen viewer for all devices")
 
 
 def main() -> None:

@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 automation_studio.db
 artifacts/
+tools/

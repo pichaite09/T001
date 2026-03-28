@@ -13,6 +13,7 @@ from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 
 class DevicesPage(QtWidgets.QWidget):
     devices_changed = QtCore.Signal()
+    open_screen_requested = QtCore.Signal()
 
     STATUS_LABELS = {
         "connected": "Connected",
@@ -99,9 +100,11 @@ class DevicesPage(QtWidgets.QWidget):
         self.refresh_button = make_button("Refresh", "secondary")
         self.refresh_info_button = make_button("Refresh Info", "secondary")
         self.test_button = make_button("Test Connection")
+        self.open_screen_button = make_button("Open Screen Wall")
         action_row.addWidget(self.refresh_button)
         action_row.addWidget(self.refresh_info_button)
         action_row.addWidget(self.test_button)
+        action_row.addWidget(self.open_screen_button)
         action_row.addStretch(1)
         table_layout.addLayout(action_row)
 
@@ -261,6 +264,7 @@ class DevicesPage(QtWidgets.QWidget):
         self.save_button.clicked.connect(self.save_device)
         self.delete_button.clicked.connect(self.delete_device)
         self.test_button.clicked.connect(self.test_connection)
+        self.open_screen_button.clicked.connect(self.open_screen_viewer)
         self.screenshot_button.clicked.connect(self.capture_screenshot)
         self.dump_hierarchy_button.clicked.connect(self.dump_hierarchy)
         self.open_artifacts_button.clicked.connect(self.open_artifacts_folder)
@@ -554,6 +558,28 @@ class DevicesPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Screenshot failed", message)
         self.load_devices()
 
+    def _open_selected_screen_viewer_legacy(self) -> None:
+        device = self._current_device_record()
+        serial = self.serial_input.text().strip()
+        if device is None or not serial:
+            QtWidgets.QMessageBox.warning(self, "Missing device", "กรุณาเลือกอุปกรณ์และตรวจสอบ Serial / ADB Address")
+            return
+        device_id = int(device["id"])
+        device_name = str(device.get("name") or f"Device {device_id}")
+        self._log_device_event("device_viewer_open_requested", "Opened screen viewer request", {"serial": serial})
+        self.open_screen_requested.emit(device_id, serial, device_name)
+
+    def open_screen_viewer(self) -> None:
+        if not self._devices:
+            QtWidgets.QMessageBox.warning(self, "Missing devices", "กรุณาเพิ่มอุปกรณ์ก่อนเปิด Screen Wall")
+            return
+        self._log_device_event(
+            "device_viewer_open_requested",
+            "Opened screen viewer request",
+            {"device_count": len(self._devices), "mode": "all_devices"},
+        )
+        self.open_screen_requested.emit()
+
     def dump_hierarchy(self) -> None:
         serial = self.serial_input.text().strip()
         if not serial:
@@ -668,6 +694,7 @@ class DevicesPage(QtWidgets.QWidget):
             self.open_artifacts_button,
         ):
             button.setEnabled(enabled)
+        self.open_screen_button.setEnabled(bool(self._devices))
 
     def _log_device_event(
         self,
