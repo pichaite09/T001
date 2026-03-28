@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import automation_studio.ui.screen_viewer_window as screen_viewer_module
 from automation_studio.ui.screen_viewer_window import (
     DeviceDetailViewerWindow,
     DeviceScreenTile,
@@ -69,6 +70,7 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertEqual(window.scrcpy_bit_rate_combo.count(), 6)
         self.assertEqual(window.resolution_combo.count(), 4)
         self.assertEqual(window.zoom_combo.count(), 7)
+        self.assertEqual(window.workflow_mode_combo.count(), 4)
         self.assertEqual(window.pause_button.text(), "Pause")
         self.assertEqual(len(window._tiles), 2)
         self.assertEqual(window.selection_count_chip.text(), "0 selected")
@@ -289,6 +291,7 @@ class ScreenViewerTests(unittest.TestCase):
         settings.setValue("wall/scrcpy_max_size", 1024)
         settings.setValue("wall/scrcpy_max_fps", 30)
         settings.setValue("wall/scrcpy_bit_rate", "8M")
+        settings.setValue("wall/workflow_parallelism", 4)
         settings.sync()
         window = ScreenViewerWindow(
             devices=[{"id": 1, "name": "Phone A", "serial": "SERIAL1"}],
@@ -303,6 +306,7 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertEqual(window.scrcpy_max_size_combo.currentData(), 1024)
         self.assertEqual(window.scrcpy_max_fps_combo.currentData(), 30)
         self.assertEqual(window.scrcpy_bit_rate_combo.currentData(), "8M")
+        self.assertEqual(window.workflow_mode_combo.currentData(), 4)
         window.close()
 
     def test_run_selected_workflow_uses_only_selected_devices(self) -> None:
@@ -325,7 +329,7 @@ class ScreenViewerTests(unittest.TestCase):
         window.workflow_combo.setCurrentIndex(window.workflow_combo.findData(11))
         window._tiles[0].set_selected(True)
         window.run_selected_workflow()
-        self.assertEqual(captured, [(11, [1], "Status: running workflow on 1 selected devices")])
+        self.assertEqual(captured, [(11, [1], "Status: running workflow on 1 selected devices (Sequential)")])
         window.close()
 
     def test_run_all_workflow_uses_all_devices(self) -> None:
@@ -347,7 +351,67 @@ class ScreenViewerTests(unittest.TestCase):
         )
         window.workflow_combo.setCurrentIndex(window.workflow_combo.findData(11))
         window.run_all_workflow()
-        self.assertEqual(captured, [(11, [1, 2], "Status: running workflow on all 2 devices")])
+        self.assertEqual(captured, [(11, [1, 2], "Status: running workflow on all 2 devices (Sequential)")])
+        window.close()
+
+    def test_parallel_all_mode_uses_selected_device_count(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+                {"id": 3, "name": "Phone C", "serial": "SERIAL3"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        window.workflow_mode_combo.setCurrentIndex(window.workflow_mode_combo.findData(-1))
+        self.assertEqual(window._selected_workflow_parallelism(), 3)
+        window.close()
+
+    def test_start_workflow_runner_passes_parallelism(self) -> None:
+        workflows = [{"id": 11, "name": "Demo Workflow"}]
+        service = self._workflow_service_stub(workflows)
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            workflows=workflows,
+            workflow_service=service,
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: dict[str, object] = {}
+
+        class _Runner(QtCore.QObject):
+            progress = QtCore.Signal(object)
+            result_ready = QtCore.Signal(dict)
+            finished = QtCore.Signal()
+
+            def __init__(self, workflow_service, workflow_id, device_records, max_parallel=1) -> None:
+                super().__init__()
+                captured["workflow_id"] = workflow_id
+                captured["device_ids"] = [int(item["id"]) for item in device_records]
+                captured["max_parallel"] = max_parallel
+
+            def start(self) -> None:
+                captured["started"] = True
+
+            def request_stop(self) -> None:
+                captured["stopped"] = True
+
+        original_runner = screen_viewer_module.WorkflowBatchRunner
+        screen_viewer_module.WorkflowBatchRunner = _Runner
+        try:
+            window.workflow_combo.setCurrentIndex(window.workflow_combo.findData(11))
+            window.workflow_mode_combo.setCurrentIndex(window.workflow_mode_combo.findData(4))
+            window.run_all_workflow()
+        finally:
+            screen_viewer_module.WorkflowBatchRunner = original_runner
+        self.assertEqual(captured["workflow_id"], 11)
+        self.assertEqual(captured["device_ids"], [1, 2])
+        self.assertEqual(captured["max_parallel"], 2)
+        self.assertTrue(captured["started"])
         window.close()
 
     def test_workflow_progress_updates_tile_state(self) -> None:
@@ -403,7 +467,7 @@ class ScreenViewerTests(unittest.TestCase):
         runner = _Runner()
         window._workflow_runner = runner  # type: ignore[assignment]
         window._workflow_target_device_ids = {1, 2}
-        window._workflow_current_device_id = 1
+        window._workflow_running_device_ids = {1}
         window._tiles[0].set_workflow_state("running", "Phone A")
         window._tiles[1].set_workflow_state("queued", "Demo Workflow")
         window.stop_workflow_run()
@@ -461,6 +525,96 @@ class ScreenViewerTests(unittest.TestCase):
         window._tiles[1].set_selected(True)
         window.open_realtime_selected_viewers()
         self.assertEqual(captured, ["SERIAL1", "SERIAL2"])
+        window.close()
+
+    def test_set_min_brightness_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[str] = []
+        window._tiles[0].set_min_brightness = lambda: captured.append("SERIAL1") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].set_min_brightness = lambda: captured.append("SERIAL2") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[0].set_selected(True)
+        window.set_min_brightness_selected_tiles()
+        self.assertEqual(captured, ["SERIAL1"])
+        self.assertIn("minimum", window.status_label.text().lower())
+        window.close()
+
+    def test_set_max_brightness_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[str] = []
+        window._tiles[0].set_max_brightness = lambda: captured.append("SERIAL1") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].set_max_brightness = lambda: captured.append("SERIAL2") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].set_selected(True)
+        window.set_max_brightness_selected_tiles()
+        self.assertEqual(captured, ["SERIAL2"])
+        self.assertIn("maximum", window.status_label.text().lower())
+        window.close()
+
+    def test_press_home_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[str] = []
+        window._tiles[0].press_home = lambda: captured.append("SERIAL1") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].press_home = lambda: captured.append("SERIAL2") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[0].set_selected(True)
+        window.press_home_selected_tiles()
+        self.assertEqual(captured, ["SERIAL1"])
+        self.assertIn("home", window.status_label.text().lower())
+        window.close()
+
+    def test_press_back_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[str] = []
+        window._tiles[0].press_back = lambda: captured.append("SERIAL1") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].press_back = lambda: captured.append("SERIAL2") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].set_selected(True)
+        window.press_back_selected_tiles()
+        self.assertEqual(captured, ["SERIAL2"])
+        self.assertIn("back", window.status_label.text().lower())
+        window.close()
+
+    def test_press_recent_apps_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[str] = []
+        window._tiles[0].press_recent_apps = lambda: captured.append("SERIAL1") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].press_recent_apps = lambda: captured.append("SERIAL2") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[0].set_selected(True)
+        window.press_recent_apps_selected_tiles()
+        self.assertEqual(captured, ["SERIAL1"])
+        self.assertIn("recent apps", window.status_label.text().lower())
         window.close()
 
 
