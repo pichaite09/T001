@@ -45,12 +45,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Android Automation Studio")
-        self.resize(1500, 920)
         self._schedule_runners: dict[int, ScheduleRunThread] = {}
         self._queued_schedule_runs: dict[int, tuple[str, bool]] = {}
         self._scheduler_startup_recovery_pending = True
         self._init_services()
         self._build_ui()
+        self._apply_initial_window_geometry()
         self._init_scheduler_timer()
 
     def _init_services(self) -> None:
@@ -357,6 +357,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.devices_page.status_label.setText("Opened screen viewer for all devices")
             return
         self.devices_page.status_label.setText("Failed to open screen viewer for all devices")
+
+    def _apply_initial_window_geometry(self) -> None:
+        desired_width = 1600
+        desired_height = 900
+        self.setMinimumSize(0, 0)
+
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if not screen:
+            self.resize(desired_width, desired_height)
+            return
+
+        available = screen.availableGeometry()
+        width = min(desired_width, available.width())
+        height = min(desired_height, available.height())
+        width = max(960, width)
+        height = max(640, height)
+
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
 
 
 def main() -> None:
