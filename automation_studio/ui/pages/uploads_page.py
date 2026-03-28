@@ -117,6 +117,16 @@ class UploadsPage(QtWidgets.QWidget):
         self.summary_insights_label.setWordWrap(True)
         root.addWidget(self.summary_insights_label)
 
+        splitter = QtWidgets.QSplitter()
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        root.addWidget(splitter, 1)
+
+        left_card = CardFrame()
+        left_layout = QtWidgets.QVBoxLayout(left_card)
+        left_layout.setContentsMargins(18, 18, 18, 18)
+        left_layout.setSpacing(10)
+
         template_card = CardFrame()
         template_layout = QtWidgets.QHBoxLayout(template_card)
         template_layout.setContentsMargins(14, 12, 14, 12)
@@ -124,7 +134,7 @@ class UploadsPage(QtWidgets.QWidget):
         template_label = QtWidgets.QLabel("Upload Template")
         template_label.setObjectName("subtitleLabel")
         self.template_combo = QtWidgets.QComboBox()
-        self.template_combo.setMinimumWidth(280)
+        self.template_combo.setMinimumWidth(240)
         self.apply_template_button = make_button("Apply Template", "secondary")
         self.save_template_button = make_button("Save Template", "secondary")
         self.delete_template_button = make_button("Delete Template", "danger")
@@ -133,7 +143,7 @@ class UploadsPage(QtWidgets.QWidget):
         template_layout.addWidget(self.apply_template_button)
         template_layout.addWidget(self.save_template_button)
         template_layout.addWidget(self.delete_template_button)
-        root.addWidget(template_card)
+        left_layout.addWidget(template_card)
 
         auto_card = CardFrame()
         auto_layout = QtWidgets.QHBoxLayout(auto_card)
@@ -156,16 +166,7 @@ class UploadsPage(QtWidgets.QWidget):
         auto_layout.addWidget(self.auto_run_interval_combo)
         auto_layout.addStretch(1)
         auto_layout.addWidget(self.auto_run_state_label, 1)
-        root.addWidget(auto_card)
-
-        splitter = QtWidgets.QSplitter()
-        splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter, 1)
-
-        left_card = CardFrame()
-        left_layout = QtWidgets.QVBoxLayout(left_card)
-        left_layout.setContentsMargins(18, 18, 18, 18)
-        left_layout.setSpacing(10)
+        left_layout.addWidget(auto_card)
 
         toolbar = QtWidgets.QHBoxLayout()
         self.new_button = make_button("New Upload", "secondary")
@@ -211,6 +212,8 @@ class UploadsPage(QtWidgets.QWidget):
         splitter.addWidget(left_card)
 
         right_card = CardFrame()
+        right_card.setMinimumWidth(360)
+        right_card.setMaximumWidth(520)
         form_layout = QtWidgets.QVBoxLayout(right_card)
         form_layout.setContentsMargins(18, 18, 18, 18)
         form_layout.setSpacing(10)
@@ -255,9 +258,11 @@ class UploadsPage(QtWidgets.QWidget):
         form.addRow("Metadata JSON", self.metadata_input)
         form.addRow("Current Status", self.job_status_label)
         form_layout.addLayout(form)
+        form_layout.addStretch(1)
         splitter.addWidget(right_card)
-        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 2)
+        splitter.setSizes([980, 420])
 
         self.new_button.clicked.connect(self.clear_form)
         self.save_button.clicked.connect(self.save_upload_job)
