@@ -74,7 +74,7 @@ class UploadsPage(QtWidgets.QWidget):
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(16)
+        root.setSpacing(12)
 
         title = QtWidgets.QLabel("Uploads")
         title.setObjectName("titleLabel")
@@ -87,7 +87,7 @@ class UploadsPage(QtWidgets.QWidget):
         root.addWidget(subtitle)
 
         summary_layout = QtWidgets.QHBoxLayout()
-        summary_layout.setSpacing(10)
+        summary_layout.setSpacing(8)
         self.summary_cards: dict[str, QtWidgets.QLabel] = {}
         for key, label in (
             ("total_jobs", "Upload Jobs"),
@@ -99,13 +99,13 @@ class UploadsPage(QtWidgets.QWidget):
         ):
             card = CardFrame()
             card_layout = QtWidgets.QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 12, 14, 12)
+            card_layout.setContentsMargins(12, 8, 12, 8)
             card_layout.setSpacing(4)
             caption = QtWidgets.QLabel(label)
             caption.setObjectName("subtitleLabel")
             value = QtWidgets.QLabel("0")
             value.setObjectName("titleLabel")
-            value.setStyleSheet("font-size: 24px;")
+            value.setStyleSheet("font-size: 22px;")
             card_layout.addWidget(caption)
             card_layout.addWidget(value)
             summary_layout.addWidget(card, 1)
@@ -124,15 +124,15 @@ class UploadsPage(QtWidgets.QWidget):
 
         left_card = CardFrame()
         left_layout = QtWidgets.QVBoxLayout(left_card)
-        left_layout.setContentsMargins(18, 18, 18, 18)
-        left_layout.setSpacing(10)
+        left_layout.setContentsMargins(14, 14, 14, 14)
+        left_layout.setSpacing(8)
 
         template_card = CardFrame()
         template_layout = QtWidgets.QVBoxLayout(template_card)
-        template_layout.setContentsMargins(14, 12, 14, 12)
-        template_layout.setSpacing(8)
+        template_layout.setContentsMargins(12, 10, 12, 10)
+        template_layout.setSpacing(6)
         template_row = QtWidgets.QHBoxLayout()
-        template_row.setSpacing(10)
+        template_row.setSpacing(8)
         template_label = QtWidgets.QLabel("Upload Template")
         template_label.setObjectName("subtitleLabel")
         self.template_combo = QtWidgets.QComboBox()
@@ -144,7 +144,7 @@ class UploadsPage(QtWidgets.QWidget):
         template_row.addWidget(self.template_combo, 1)
         template_layout.addLayout(template_row)
         template_actions = QtWidgets.QHBoxLayout()
-        template_actions.setSpacing(10)
+        template_actions.setSpacing(8)
         template_actions.addStretch(1)
         template_actions.addWidget(self.apply_template_button)
         template_actions.addWidget(self.save_template_button)
@@ -154,10 +154,10 @@ class UploadsPage(QtWidgets.QWidget):
 
         auto_card = CardFrame()
         auto_layout = QtWidgets.QVBoxLayout(auto_card)
-        auto_layout.setContentsMargins(14, 12, 14, 12)
-        auto_layout.setSpacing(8)
+        auto_layout.setContentsMargins(12, 10, 12, 10)
+        auto_layout.setSpacing(6)
         auto_top_row = QtWidgets.QHBoxLayout()
-        auto_top_row.setSpacing(10)
+        auto_top_row.setSpacing(8)
         auto_label = QtWidgets.QLabel("Auto Draft Runner")
         auto_label.setObjectName("subtitleLabel")
         self.auto_run_checkbox = QtWidgets.QCheckBox("Auto Run Draft Jobs")
@@ -179,7 +179,7 @@ class UploadsPage(QtWidgets.QWidget):
         left_layout.addWidget(auto_card)
 
         toolbar_primary = QtWidgets.QHBoxLayout()
-        toolbar_primary.setSpacing(8)
+        toolbar_primary.setSpacing(6)
         self.new_button = make_button("New Upload", "secondary")
         self.save_button = make_button("Save Upload")
         self.run_now_button = make_button("Run Now", "secondary")
@@ -201,7 +201,7 @@ class UploadsPage(QtWidgets.QWidget):
         left_layout.addLayout(toolbar_primary)
 
         toolbar_secondary = QtWidgets.QHBoxLayout()
-        toolbar_secondary.setSpacing(8)
+        toolbar_secondary.setSpacing(6)
         for button in (
             self.import_button,
             self.export_button,
@@ -230,12 +230,16 @@ class UploadsPage(QtWidgets.QWidget):
         left_layout.addWidget(self.status_label)
         splitter.addWidget(left_card)
 
+        right_scroll = QtWidgets.QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        right_scroll.setMinimumWidth(300)
+        right_scroll.setMaximumWidth(460)
+
         right_card = CardFrame()
-        right_card.setMinimumWidth(300)
-        right_card.setMaximumWidth(460)
         form_layout = QtWidgets.QVBoxLayout(right_card)
-        form_layout.setContentsMargins(18, 18, 18, 18)
-        form_layout.setSpacing(10)
+        form_layout.setContentsMargins(14, 14, 14, 14)
+        form_layout.setSpacing(8)
 
         form = QtWidgets.QFormLayout()
         self.device_combo = QtWidgets.QComboBox()
@@ -246,9 +250,9 @@ class UploadsPage(QtWidgets.QWidget):
         self.link_product_input = QtWidgets.QLineEdit()
         self.title_input = QtWidgets.QLineEdit()
         self.description_input = QtWidgets.QPlainTextEdit()
-        self.description_input.setFixedHeight(96)
+        self.description_input.setFixedHeight(72)
         self.tags_input = QtWidgets.QPlainTextEdit()
-        self.tags_input.setFixedHeight(68)
+        self.tags_input.setFixedHeight(56)
         self.tags_input.setPlaceholderText("tag1, tag2, tag3")
         self.video_url_input = QtWidgets.QLineEdit()
         self.video_url_input.setPlaceholderText("https://example.com/video.mp4")
@@ -257,7 +261,7 @@ class UploadsPage(QtWidgets.QWidget):
         self.local_video_path_input = QtWidgets.QLineEdit()
         self.local_video_path_input.setPlaceholderText("D:/videos/post.mp4")
         self.metadata_input = QtWidgets.QPlainTextEdit()
-        self.metadata_input.setFixedHeight(96)
+        self.metadata_input.setFixedHeight(72)
         self.metadata_input.setPlaceholderText('{\n  "campaign": "spring-launch"\n}')
         self.job_status_label = QtWidgets.QLabel("draft")
         self.job_status_label.setObjectName("subtitleLabel")
@@ -278,7 +282,8 @@ class UploadsPage(QtWidgets.QWidget):
         form.addRow("Current Status", self.job_status_label)
         form_layout.addLayout(form)
         form_layout.addStretch(1)
-        splitter.addWidget(right_card)
+        right_scroll.setWidget(right_card)
+        splitter.addWidget(right_scroll)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([900, 360])
