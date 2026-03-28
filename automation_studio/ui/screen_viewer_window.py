@@ -583,6 +583,9 @@ class DeviceScreenTile(QtWidgets.QFrame):
         self._zoom_factor = 1.0
         self._resolution_scale = 1.0
         self._selected = False
+        self._status_badge_state = "connected"
+        self._workflow_state_key = "idle"
+        self._workflow_state_message = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -593,64 +596,79 @@ class DeviceScreenTile(QtWidgets.QFrame):
         self._apply_selection_style()
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-
-        header_row = QtWidgets.QHBoxLayout()
-        header_row.setSpacing(4)
-        self.select_checkbox = QtWidgets.QCheckBox()
-        self.select_checkbox.setToolTip("Select device for batch actions")
-        self.select_checkbox.setStyleSheet("spacing:0px;")
-        self.title_label = QtWidgets.QLabel(self.device_name)
-        self.title_label.setStyleSheet("font-size: 10.5pt; font-weight: 700; color: #f8fbff;")
-        self.status_badge = QtWidgets.QLabel("Connected")
-        self.status_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.status_badge.setStyleSheet(
-            "background:#103424; color:#9ae6b4; border:1px solid #1f5b3f; border-radius:9px; padding:3px 8px; font-weight:600; font-size:8.5pt;"
-        )
-        header_row.addWidget(self.select_checkbox, 0)
-        header_row.addWidget(self.title_label, 1)
-        header_row.addWidget(self.status_badge, 0)
-        layout.addLayout(header_row)
-
-        self.serial_label = QtWidgets.QLabel(self.serial)
-        self.serial_label.setObjectName("subtitleLabel")
-        self.serial_label.setWordWrap(False)
-        self.serial_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.serial_label.setStyleSheet("font-size:8.5pt; color:#7f92ab;")
-        layout.addWidget(self.serial_label)
-
-        meta_row = QtWidgets.QHBoxLayout()
-        meta_row.setSpacing(4)
-        self.size_label = QtWidgets.QLabel("-")
-        self.size_label.setObjectName("subtitleLabel")
-        self.size_label.setStyleSheet("font-size:8.5pt; color:#8fa4bd;")
-        meta_row.addWidget(self.size_label, 0)
-        meta_row.addStretch(1)
-        layout.addLayout(meta_row)
-
-        self.workflow_state_label = QtWidgets.QLabel("Idle")
-        self.workflow_state_label.setObjectName("subtitleLabel")
-        self.workflow_state_label.setStyleSheet(
-            "font-size:8.5pt; color:#6ee7b7; background:#0f1b15; border:1px solid #1f4a34; border-radius:8px; padding:2px 6px;"
-        )
-        layout.addWidget(self.workflow_state_label, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        layout.setSpacing(0)
 
         self.image_card = QtWidgets.QFrame()
         self.image_card.setStyleSheet("background:transparent; border:none;")
         self.image_card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
-        image_layout = QtWidgets.QVBoxLayout(self.image_card)
+        image_layout = QtWidgets.QGridLayout(self.image_card)
         image_layout.setContentsMargins(0, 0, 0, 0)
         image_layout.setSpacing(0)
         self.image_label = ViewerImageLabel("Waiting for frame")
-        self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+        self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.image_label.setToolTip("Double-click to open scrcpy realtime")
         placeholder_size = self._target_screen_size()
         self.image_label.setFixedSize(placeholder_size)
-        image_layout.addWidget(self.image_label, 0, QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop)
+        image_layout.addWidget(self.image_label, 0, 0, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+
+        self.overlay_container = QtWidgets.QFrame()
+        self.overlay_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.overlay_container.setStyleSheet("background:transparent; border:none;")
+        self.overlay_container.setFixedSize(placeholder_size)
+        overlay_layout = QtWidgets.QVBoxLayout(self.overlay_container)
+        overlay_layout.setContentsMargins(6, 6, 6, 6)
+        overlay_layout.setSpacing(4)
+
+        top_overlay_row = QtWidgets.QHBoxLayout()
+        top_overlay_row.setSpacing(0)
+        self.select_checkbox = QtWidgets.QCheckBox()
+        self.select_checkbox.setToolTip("Select device for batch actions")
+        self.select_checkbox.setStyleSheet("spacing:0px;")
+        self.status_badge = QtWidgets.QLabel("Connected")
+        self.status_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.status_badge.setStyleSheet(
+            "background:#16a34a; border:1px solid #1f5b3f; border-radius:6px;"
+        )
+        self.status_badge.setFixedSize(12, 12)
+        self.status_badge.setText("")
+        self.status_badge.setToolTip("Connected")
+        top_overlay_row.addStretch(1)
+        top_overlay_row.addWidget(self.status_badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        overlay_layout.addLayout(top_overlay_row)
+
+        overlay_layout.addStretch(1)
+
+        footer_row = QtWidgets.QHBoxLayout()
+        footer_row.setSpacing(4)
+        self.size_label = QtWidgets.QLabel("-")
+        self.size_label.setObjectName("subtitleLabel")
+        self.size_label.setStyleSheet(
+            "font-size:8pt; color:#dbeafe; background:rgba(7, 14, 25, 120); border:1px solid rgba(51, 73, 104, 110); border-radius:8px; padding:2px 6px;"
+        )
+        self.workflow_state_label = QtWidgets.QLabel("Idle")
+        self.workflow_state_label.setObjectName("subtitleLabel")
+        self.workflow_state_label.setStyleSheet(
+            "font-size:8pt; color:#6ee7b7; background:#0f1b15; border:1px solid #1f4a34; border-radius:8px; padding:2px 6px;"
+        )
+        footer_row.addWidget(self.size_label, 0)
+        footer_row.addStretch(1)
+        footer_row.addWidget(self.workflow_state_label, 0)
+        overlay_layout.addLayout(footer_row)
+
+        image_layout.addWidget(self.overlay_container, 0, 0, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
+        self.checkbox_overlay = QtWidgets.QFrame()
+        self.checkbox_overlay.setStyleSheet("background:rgba(7, 14, 25, 90); border:1px solid rgba(51, 73, 104, 90); border-radius:8px;")
+        checkbox_layout = QtWidgets.QHBoxLayout(self.checkbox_overlay)
+        checkbox_layout.setContentsMargins(4, 4, 4, 4)
+        checkbox_layout.setSpacing(0)
+        checkbox_layout.addWidget(self.select_checkbox, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.checkbox_overlay.setFixedSize(22, 22)
+        image_layout.addWidget(self.checkbox_overlay, 0, 0, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
         self.image_card.setFixedSize(placeholder_size)
         layout.addWidget(self.image_card, 0, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop)
         self.image_label.double_clicked.connect(lambda: self.realtime_requested.emit(self))
         self.select_checkbox.toggled.connect(self.set_selected)
+        self._apply_overlay_metrics(placeholder_size)
 
     def _load_uiautomator2(self):
         try:
@@ -775,6 +793,60 @@ class DeviceScreenTile(QtWidgets.QFrame):
     def _preferred_tile_width(self) -> int:
         return self._target_screen_size().width()
 
+    def _workflow_style_for_state(self, normalized: str) -> str:
+        style_map = {
+            "idle": "color:#6ee7b7; background:rgba(15, 27, 21, 160); border:1px solid rgba(31, 74, 52, 170);",
+            "queued": "color:#c4b5fd; background:rgba(22, 18, 39, 160); border:1px solid rgba(76, 29, 149, 170);",
+            "running": "color:#7dd3fc; background:rgba(14, 26, 43, 160); border:1px solid rgba(29, 78, 216, 170);",
+            "success": "color:#86efac; background:rgba(16, 36, 23, 160); border:1px solid rgba(22, 101, 52, 170);",
+            "failed": "color:#fca5a5; background:rgba(42, 18, 21, 160); border:1px solid rgba(153, 27, 27, 170);",
+            "stopped": "color:#fcd34d; background:rgba(43, 33, 16, 160); border:1px solid rgba(146, 64, 14, 170);",
+        }
+        return style_map.get(normalized, style_map["idle"])
+
+    def _apply_overlay_metrics(self, screen_size: QtCore.QSize | None = None) -> None:
+        target = screen_size or self.image_label.size() or self._target_screen_size()
+        width = max(target.width(), 120)
+        scale = max(0.78, min(width / 220.0, 1.45))
+        margin = max(4, int(round(6 * scale)))
+        spacing = max(2, int(round(4 * scale)))
+        label_pt = max(7.0, round(7.8 * scale, 1))
+        chip_pt = max(6.8, round(7.4 * scale, 1))
+        dot_size = max(9, int(round(12 * scale)))
+        checkbox_size = max(10, int(round(12 * scale)))
+        checkbox_box = max(18, int(round(22 * scale)))
+        radius = max(5, int(round(8 * scale)))
+        hpad = max(4, int(round(6 * scale)))
+        vpad = max(1, int(round(2 * scale)))
+
+        overlay_layout = self.overlay_container.layout()
+        if isinstance(overlay_layout, QtWidgets.QVBoxLayout):
+            overlay_layout.setContentsMargins(margin, margin, margin, margin)
+            overlay_layout.setSpacing(spacing)
+        self.select_checkbox.setStyleSheet(
+            "spacing:0px;"
+            f" QCheckBox::indicator {{ width:{checkbox_size}px; height:{checkbox_size}px; }}"
+        )
+        self.checkbox_overlay.setFixedSize(checkbox_box, checkbox_box)
+        self.checkbox_overlay.setStyleSheet(
+            f"background:rgba(7, 14, 25, 82); border:1px solid rgba(51, 73, 104, 80); border-radius:{max(6, checkbox_box // 3)}px;"
+        )
+        checkbox_layout = self.checkbox_overlay.layout()
+        if isinstance(checkbox_layout, QtWidgets.QHBoxLayout):
+            inset = max(2, int(round(4 * scale)))
+            checkbox_layout.setContentsMargins(inset, inset, inset, inset)
+        self.status_badge.setFixedSize(dot_size, dot_size)
+        self.status_badge.setStyleSheet(
+            f"{self._status_badge_style()} border-radius:{max(4, dot_size // 2)}px;"
+        )
+        self.size_label.setStyleSheet(
+            f"font-size:{label_pt}pt; color:#dbeafe; background:rgba(7, 14, 25, 110); "
+            f"border:1px solid rgba(51, 73, 104, 95); border-radius:{radius}px; padding:{vpad}px {hpad}px;"
+        )
+        self.workflow_state_label.setStyleSheet(
+            f"font-size:{chip_pt}pt; border-radius:{radius}px; padding:{vpad}px {hpad}px; {self._workflow_style_for_state(self._workflow_state_key)}"
+        )
+
     def is_selected(self) -> bool:
         return self._selected
 
@@ -806,12 +878,14 @@ class DeviceScreenTile(QtWidgets.QFrame):
         self._zoom_factor = max(0.5, min(float(zoom_factor or 1.0), 2.0))
         scaled_size = self._target_screen_size()
         self.image_label.setFixedSize(scaled_size)
+        self.overlay_container.setFixedSize(scaled_size)
         self.image_card.setFixedSize(
             scaled_size.width() + self.IMAGE_FRAME_PADDING * 2,
             scaled_size.height() + self.IMAGE_FRAME_PADDING * 2,
         )
         self.setMinimumWidth(self._preferred_tile_width())
         self.setMaximumWidth(self._preferred_tile_width())
+        self._apply_overlay_metrics(scaled_size)
         self._render_pixmap()
 
     def set_resolution_scale(self, resolution_scale: float) -> None:
@@ -827,19 +901,11 @@ class DeviceScreenTile(QtWidgets.QFrame):
             "failed": "Failed",
             "stopped": "Stopped",
         }.get(normalized, normalized.title())
-        style_map = {
-            "idle": "color:#6ee7b7; background:#0f1b15; border:1px solid #1f4a34;",
-            "queued": "color:#c4b5fd; background:#161227; border:1px solid #4c1d95;",
-            "running": "color:#7dd3fc; background:#0e1a2b; border:1px solid #1d4ed8;",
-            "success": "color:#86efac; background:#102417; border:1px solid #166534;",
-            "failed": "color:#fca5a5; background:#2a1215; border:1px solid #991b1b;",
-            "stopped": "color:#fcd34d; background:#2b2110; border:1px solid #92400e;",
-        }
+        self._workflow_state_key = normalized
+        self._workflow_state_message = message or ""
         self.workflow_state_label.setText(label_text)
-        self.workflow_state_label.setStyleSheet(
-            f"font-size:8.5pt; border-radius:8px; padding:2px 6px; {style_map.get(normalized, style_map['idle'])}"
-        )
-        self.workflow_state_label.setToolTip(message or "")
+        self.workflow_state_label.setToolTip(self._workflow_state_message)
+        self._apply_overlay_metrics()
 
     def current_pixmap(self) -> QtGui.QPixmap | None:
         return self._last_pixmap
@@ -857,7 +923,9 @@ class DeviceScreenTile(QtWidgets.QFrame):
             self.image_label.setText("Waiting for frame")
             self.image_label.setPixmap(QtGui.QPixmap())
             self.image_label.setFixedSize(target_size)
+            self.overlay_container.setFixedSize(target_size)
             self.image_card.setFixedSize(target_size)
+            self._apply_overlay_metrics(target_size)
             return
         scaled = self._last_pixmap.scaled(
             target_size,
@@ -867,25 +935,32 @@ class DeviceScreenTile(QtWidgets.QFrame):
         self.image_label.setPixmap(scaled)
         self.image_label.setText("")
         self.image_label.setFixedSize(scaled.size())
+        self.overlay_container.setFixedSize(scaled.size())
         self.image_card.setFixedSize(scaled.size())
         self.setMinimumWidth(self._preferred_tile_width())
         self.setMaximumWidth(self._preferred_tile_width())
+        self._apply_overlay_metrics(scaled.size())
+
+    def _status_badge_style(self) -> str:
+        normalized = (self._status_badge_state or "").casefold()
+        if normalized == "connected":
+            return "background:#16a34a; border:1px solid #1f5b3f;"
+        if normalized == "reconnecting":
+            return "background:#f59e0b; border:1px solid #92400e;"
+        return "background:#64748b; border:1px solid #334864;"
 
     def _set_status_badge(self, status: str) -> None:
         normalized = (status or "").casefold()
+        self._status_badge_state = normalized or "unknown"
         if normalized == "connected":
-            text = "Connected"
-            style = "background:#103424; color:#9ae6b4; border:1px solid #1f5b3f;"
+            tooltip = "Connected"
         elif normalized == "reconnecting":
-            text = "Refreshing"
-            style = "background:#2f2410; color:#fbd38d; border:1px solid #6b4f1d;"
+            tooltip = "Refreshing"
         else:
-            text = status.title() if status else "Unknown"
-            style = "background:#1a2434; color:#dbe7ff; border:1px solid #334864;"
-        self.status_badge.setText(text)
-        self.status_badge.setStyleSheet(
-            f"{style} border-radius:10px; padding:4px 10px; font-weight:600;"
-        )
+            tooltip = status.title() if status else "Unknown"
+        self.status_badge.setText("")
+        self.status_badge.setToolTip(tooltip)
+        self._apply_overlay_metrics()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
