@@ -138,7 +138,7 @@ class MainWindow(QtWidgets.QMainWindow):
         content_layout.setSpacing(0)
 
         self.stack = QtWidgets.QStackedWidget()
-        self.devices_page = DevicesPage(self.device_service)
+        self.devices_page = DevicesPage(self.device_service, self.log_service)
         self.accounts_page = AccountsPage(
             self.account_service,
             self.device_service,

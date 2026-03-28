@@ -68,6 +68,18 @@ class DeviceRepository:
                 (status, timestamp, timestamp, device_id),
             )
 
+    def update_runtime_info(self, device_id: int, status: str, info_json: str) -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE devices
+                SET last_status = ?, last_seen = ?, last_info_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, timestamp, info_json, timestamp, device_id),
+            )
+
 
 class WorkflowRepository:
     def __init__(self, db: DatabaseManager) -> None:

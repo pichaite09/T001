@@ -55,7 +55,7 @@ class LogPage(QtWidgets.QWidget):
     def _build_ui(self) -> None:
         root_layout = QtWidgets.QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(16)
+        root_layout.setSpacing(12)
 
         title = QtWidgets.QLabel("Log")
         title.setObjectName("titleLabel")
@@ -66,13 +66,13 @@ class LogPage(QtWidgets.QWidget):
 
         card = CardFrame()
         card_layout = QtWidgets.QVBoxLayout(card)
-        card_layout.setContentsMargins(18, 18, 18, 18)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(14, 14, 14, 14)
+        card_layout.setSpacing(8)
         root_layout.addWidget(card, 1)
 
         filters = QtWidgets.QGridLayout()
-        filters.setHorizontalSpacing(12)
-        filters.setVerticalSpacing(10)
+        filters.setHorizontalSpacing(10)
+        filters.setVerticalSpacing(6)
         self.workflow_filter = QtWidgets.QComboBox()
         self.device_filter = QtWidgets.QComboBox()
         self.platform_filter = QtWidgets.QComboBox()
@@ -126,6 +126,7 @@ class LogPage(QtWidgets.QWidget):
         card_layout.addLayout(filters)
 
         quick_row = QtWidgets.QHBoxLayout()
+        quick_row.setSpacing(6)
         quick_row.addWidget(make_form_label("Quick Filters"))
         self.errors_only_check = QtWidgets.QCheckBox("Errors Only")
         self.schedules_only_check = QtWidgets.QCheckBox("Schedules Only")
@@ -144,6 +145,7 @@ class LogPage(QtWidgets.QWidget):
         card_layout.addLayout(quick_row)
 
         search_row = QtWidgets.QHBoxLayout()
+        search_row.setSpacing(6)
         search_row.addWidget(make_form_label("Search"))
         self.search_input = QtWidgets.QLineEdit()
         self.search_input.setPlaceholderText("Search message, status, workflow, device, platform, account, watcher, or metadata")
@@ -156,6 +158,8 @@ class LogPage(QtWidgets.QWidget):
         card_layout.addLayout(search_row)
 
         metrics_layout = QtWidgets.QGridLayout()
+        metrics_layout.setHorizontalSpacing(8)
+        metrics_layout.setVerticalSpacing(8)
         self.metric_labels: dict[str, QtWidgets.QLabel] = {}
         metric_titles = [
             ("sessions_today", "Runs Today"),
@@ -169,7 +173,8 @@ class LogPage(QtWidgets.QWidget):
             card_widget = QtWidgets.QFrame()
             card_widget.setProperty("panel", True)
             metric_card_layout = QtWidgets.QVBoxLayout(card_widget)
-            metric_card_layout.setContentsMargins(12, 10, 12, 10)
+            metric_card_layout.setContentsMargins(10, 8, 10, 8)
+            metric_card_layout.setSpacing(4)
             label = QtWidgets.QLabel(title_text)
             label.setObjectName("subtitleLabel")
             value = QtWidgets.QLabel("-")
@@ -177,7 +182,7 @@ class LogPage(QtWidgets.QWidget):
             value.setWordWrap(True)
             metric_card_layout.addWidget(label)
             metric_card_layout.addWidget(value)
-            metrics_layout.addWidget(card_widget, index // 3, index % 3)
+            metrics_layout.addWidget(card_widget, 0, index)
             self.metric_labels[key] = value
         card_layout.addLayout(metrics_layout)
 
@@ -187,15 +192,17 @@ class LogPage(QtWidgets.QWidget):
         events_tab = QtWidgets.QWidget()
         events_layout = QtWidgets.QVBoxLayout(events_tab)
         events_layout.setContentsMargins(0, 0, 0, 0)
+        events_layout.setSpacing(6)
 
         event_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         event_splitter.setChildrenCollapsible(False)
+        event_splitter.setHandleWidth(8)
         events_layout.addWidget(event_splitter, 1)
 
         session_panel = CardFrame()
         session_layout = QtWidgets.QVBoxLayout(session_panel)
-        session_layout.setContentsMargins(16, 16, 16, 16)
-        session_layout.setSpacing(8)
+        session_layout.setContentsMargins(12, 12, 12, 12)
+        session_layout.setSpacing(6)
         session_layout.addWidget(make_form_label("Run Sessions"))
 
         self.session_summary_label = QtWidgets.QLabel("Select a session to inspect its event timeline.")
@@ -206,6 +213,7 @@ class LogPage(QtWidgets.QWidget):
         self.failed_sessions_only_check = QtWidgets.QCheckBox("Failed Runs Only")
         self.watcher_sessions_only_check = QtWidgets.QCheckBox("Runs With Watchers")
         session_filter_row = QtWidgets.QHBoxLayout()
+        session_filter_row.setSpacing(6)
         session_filter_row.addWidget(self.failed_sessions_only_check)
         session_filter_row.addWidget(self.watcher_sessions_only_check)
         session_layout.addLayout(session_filter_row)
@@ -217,7 +225,7 @@ class LogPage(QtWidgets.QWidget):
         table_panel = QtWidgets.QWidget()
         table_layout = QtWidgets.QVBoxLayout(table_panel)
         table_layout.setContentsMargins(0, 0, 0, 0)
-        table_layout.setSpacing(8)
+        table_layout.setSpacing(6)
 
         self.timeline_summary_label = QtWidgets.QLabel("Timeline")
         self.timeline_summary_label.setObjectName("subtitleLabel")
@@ -239,8 +247,8 @@ class LogPage(QtWidgets.QWidget):
 
         details_panel = CardFrame()
         details_layout = QtWidgets.QVBoxLayout(details_panel)
-        details_layout.setContentsMargins(16, 16, 16, 16)
-        details_layout.setSpacing(8)
+        details_layout.setContentsMargins(12, 12, 12, 12)
+        details_layout.setSpacing(6)
         details_layout.addWidget(make_form_label("Event Details"))
 
         self.detail_summary_label = QtWidgets.QLabel("Select an event to inspect its execution context.")
@@ -256,22 +264,23 @@ class LogPage(QtWidgets.QWidget):
         self.detail_message = QtWidgets.QPlainTextEdit()
         self.detail_message.setReadOnly(True)
         self.detail_message.setMaximumBlockCount(300)
-        self.detail_message.setMinimumHeight(90)
+        self.detail_message.setMinimumHeight(72)
         details_layout.addWidget(self.detail_message)
 
         details_layout.addWidget(make_form_label("Metadata"))
         self.detail_metadata = QtWidgets.QPlainTextEdit()
         self.detail_metadata.setReadOnly(True)
         self.detail_metadata.setMaximumBlockCount(1000)
-        self.detail_metadata.setMinimumHeight(160)
+        self.detail_metadata.setMinimumHeight(120)
         details_layout.addWidget(self.detail_metadata, 1)
 
         details_layout.addWidget(make_form_label("Artifacts"))
         self.artifact_list = QtWidgets.QListWidget()
-        self.artifact_list.setMinimumHeight(100)
+        self.artifact_list.setMinimumHeight(72)
         details_layout.addWidget(self.artifact_list)
 
         action_row = QtWidgets.QHBoxLayout()
+        action_row.setSpacing(6)
         self.copy_message_button = make_button("Copy Event", "secondary")
         self.copy_metadata_button = make_button("Copy Metadata", "secondary")
         self.open_artifact_button = make_button("Open Artifact", "secondary")
@@ -292,7 +301,7 @@ class LogPage(QtWidgets.QWidget):
         telemetry_tab = QtWidgets.QWidget()
         telemetry_layout = QtWidgets.QVBoxLayout(telemetry_tab)
         telemetry_layout.setContentsMargins(0, 0, 0, 0)
-        telemetry_layout.setSpacing(10)
+        telemetry_layout.setSpacing(8)
 
         telemetry_layout.addWidget(make_form_label("Step Telemetry"))
         self.telemetry_table = QtWidgets.QTableWidget(0, 8)
@@ -319,18 +328,20 @@ class LogPage(QtWidgets.QWidget):
         analytics_tab = QtWidgets.QWidget()
         analytics_layout = QtWidgets.QVBoxLayout(analytics_tab)
         analytics_layout.setContentsMargins(0, 0, 0, 0)
-        analytics_layout.setSpacing(10)
+        analytics_layout.setSpacing(8)
 
         analytics_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         analytics_splitter.setChildrenCollapsible(False)
+        analytics_splitter.setHandleWidth(8)
         analytics_layout.addWidget(analytics_splitter, 1)
 
         top_card = CardFrame()
         top_layout = QtWidgets.QVBoxLayout(top_card)
-        top_layout.setContentsMargins(16, 16, 16, 16)
-        top_layout.setSpacing(8)
+        top_layout.setContentsMargins(12, 12, 12, 12)
+        top_layout.setSpacing(6)
 
         top_tables = QtWidgets.QHBoxLayout()
+        top_tables.setSpacing(8)
         self.top_steps_table = QtWidgets.QTableWidget(0, 4)
         self.top_steps_table.setHorizontalHeaderLabels(["Step Type", "Failure %", "Failures", "Workflow"])
         self.top_watchers_table = QtWidgets.QTableWidget(0, 4)
@@ -343,6 +354,7 @@ class LogPage(QtWidgets.QWidget):
             ("Top Failing Schedules", self.top_schedules_table),
         ):
             column = QtWidgets.QVBoxLayout()
+            column.setSpacing(4)
             column.addWidget(make_form_label(title_text))
             table.verticalHeader().setVisible(False)
             table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -355,10 +367,11 @@ class LogPage(QtWidgets.QWidget):
 
         bottom_card = CardFrame()
         bottom_layout = QtWidgets.QVBoxLayout(bottom_card)
-        bottom_layout.setContentsMargins(16, 16, 16, 16)
-        bottom_layout.setSpacing(8)
+        bottom_layout.setContentsMargins(12, 12, 12, 12)
+        bottom_layout.setSpacing(6)
 
         bottom_tables = QtWidgets.QHBoxLayout()
+        bottom_tables.setSpacing(8)
         self.failure_reasons_table = QtWidgets.QTableWidget(0, 3)
         self.failure_reasons_table.setHorizontalHeaderLabels(["Reason", "Count", "Latest Status"])
         self.slowest_sessions_table = QtWidgets.QTableWidget(0, 4)
@@ -368,6 +381,7 @@ class LogPage(QtWidgets.QWidget):
             ("Slowest Runs", self.slowest_sessions_table),
         ):
             column = QtWidgets.QVBoxLayout()
+            column.setSpacing(4)
             column.addWidget(make_form_label(title_text))
             table.verticalHeader().setVisible(False)
             table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
@@ -414,7 +428,7 @@ class LogPage(QtWidgets.QWidget):
         container = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.addWidget(make_form_label(text))
         layout.addWidget(widget)
         return container

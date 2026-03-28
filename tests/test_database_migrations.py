@@ -15,9 +15,13 @@ class DatabaseMigrationTests(unittest.TestCase):
             db = DatabaseManager(db_path)
             db.init_schema()
 
-            self.assertEqual(db.current_schema_version(), 13)
+            self.assertEqual(db.current_schema_version(), 14)
 
             with db.connection() as connection:
+                device_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(devices)").fetchall()
+                }
                 workflow_columns = {
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(workflows)").fetchall()
@@ -62,6 +66,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     for row in connection.execute("PRAGMA table_info(workflow_schedules)").fetchall()
                 }
 
+            self.assertIn("last_info_json", device_columns)
             self.assertIn("definition_version", workflow_columns)
             self.assertIn("schema_version", step_columns)
             self.assertIn("watcher_id", log_columns)

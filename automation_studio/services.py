@@ -6,6 +6,7 @@ import random
 import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from automation_studio.automation.engine import WorkflowExecutor
@@ -57,25 +58,124 @@ class DeviceService:
         uiautomator2 = self._load_uiautomator2()
         return uiautomator2.connect(serial)
 
-    def test_connection(
+    def _save_runtime_info(self, device_id: int | None, status: str, snapshot: dict[str, Any]) -> None:
+        if not device_id:
+            return
+        self.device_repository.update_runtime_info(
+            int(device_id),
+            status,
+            json.dumps(snapshot, ensure_ascii=False),
+        )
+
+    def _safe_window_size(self, device) -> dict[str, int]:
+        try:
+            width, height = device.window_size()
+            return {"width": int(width), "height": int(height)}
+        except Exception:
+            return {}
+
+    def _safe_current_app(self, device) -> dict[str, Any]:
+        try:
+            current = device.app_current()
+            return current if isinstance(current, dict) else {}
+        except Exception:
+            return {}
+
+    def _safe_screen_on(self, device) -> bool | None:
+        try:
+            value = getattr(device, "screen_on")
+            return bool(value() if callable(value) else value)
+        except Exception:
+            return None
+
+    def refresh_runtime_info(
         self,
         serial: str,
         device_id: int | None = None,
     ) -> tuple[bool, str, dict[str, Any] | None]:
         try:
             device = self.connect_device(serial)
-            info = device.info
-            manufacturer = info.get("manufacturer") or info.get("brand") or "Unknown"
-            model = info.get("model") or "Unknown"
-            android_version = info.get("version") or "Unknown"
-            message = f"Connected: {manufacturer} {model} / Android {android_version}"
-            if device_id:
-                self.device_repository.update_status(device_id, "connected")
-            return True, message, info
+            base_info = device.info if isinstance(device.info, dict) else {}
+            snapshot = dict(base_info)
+
+            window_size = self._safe_window_size(device)
+            if window_size:
+                snapshot["window_size"] = window_size
+
+            current_app = self._safe_current_app(device)
+            if current_app:
+                snapshot["current_app"] = current_app
+
+            screen_on = self._safe_screen_on(device)
+            if screen_on is not None:
+                snapshot["screen_on"] = screen_on
+
+            manufacturer = snapshot.get("manufacturer") or snapshot.get("brand") or "Unknown"
+            model = snapshot.get("model") or snapshot.get("marketName") or snapshot.get("device") or "Unknown"
+            android_version = snapshot.get("version") or snapshot.get("release") or snapshot.get("sdkInt") or "Unknown"
+            current_package = (
+                current_app.get("package")
+                or current_app.get("packageName")
+                or snapshot.get("currentPackageName")
+                or "-"
+            )
+            message = f"Connected: {manufacturer} {model} / Android {android_version} / App {current_package}"
+            self._save_runtime_info(device_id, "connected", snapshot)
+            return True, message, snapshot
         except Exception as exc:
             if device_id:
                 self.device_repository.update_status(device_id, "failed")
             return False, f"Connection failed: {exc}", None
+
+    def test_connection(
+        self,
+        serial: str,
+        device_id: int | None = None,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        return self.refresh_runtime_info(serial, device_id)
+
+    def capture_screenshot(
+        self,
+        serial: str,
+        output_path: str | Path,
+        device_id: int | None = None,
+    ) -> tuple[bool, str, str | None]:
+        try:
+            device = self.connect_device(serial)
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            result = device.screenshot(str(path))
+            if not path.exists() and hasattr(result, "save"):
+                result.save(str(path))
+            if not path.exists():
+                raise RuntimeError("Screenshot was not written to disk")
+            if device_id:
+                self.device_repository.update_status(device_id, "connected")
+            return True, f"Saved screenshot to {path}", str(path)
+        except Exception as exc:
+            if device_id:
+                self.device_repository.update_status(device_id, "failed")
+            return False, f"Screenshot failed: {exc}", None
+
+    def dump_hierarchy(
+        self,
+        serial: str,
+        output_path: str | Path,
+        device_id: int | None = None,
+    ) -> tuple[bool, str, str | None]:
+        try:
+            device = self.connect_device(serial)
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            hierarchy = str(device.dump_hierarchy())
+            path.write_text(hierarchy, encoding="utf-8")
+            if device_id:
+                self.device_repository.update_status(device_id, "connected")
+            return True, f"Saved hierarchy to {path}", str(path)
+        except Exception as exc:
+            if device_id:
+                self.device_repository.update_status(device_id, "failed")
+            return False, f"Hierarchy dump failed: {exc}", None
 
 
 class LogService:

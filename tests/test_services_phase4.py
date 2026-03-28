@@ -30,6 +30,11 @@ from automation_studio.services import (
 class FakeDevice:
     def __init__(self) -> None:
         self.actions: list[tuple] = []
+        self.info = {
+            "manufacturer": "Google",
+            "model": "Pixel 7",
+            "version": "14",
+        }
 
     def app_start(self, package: str):
         self.actions.append(("app_start", package))
@@ -47,6 +52,12 @@ class FakeDevice:
 
     def window_size(self):
         return (1080, 2400)
+
+    def app_current(self):
+        return {"package": "com.example.app", "activity": "MainActivity"}
+
+    def screen_on(self):
+        return True
 
 
 class FakeDeviceService(DeviceService):
@@ -100,6 +111,12 @@ class ServicePhase4Tests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        for extra_path in (
+            Path(self.db_path).with_suffix(".png"),
+            Path(self.db_path).with_suffix(".xml"),
+        ):
+            if extra_path.exists():
+                extra_path.unlink()
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
 
@@ -121,6 +138,36 @@ class ServicePhase4Tests(unittest.TestCase):
         self.assertEqual(exported["workflow"]["definition_version"], 2)
         self.assertEqual(exported["steps"][0]["schema_version"], 2)
         self.assertEqual(imported_steps[0]["step_type"], "plugin:echo_context")
+
+    def test_device_connection_persists_runtime_info(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+
+        success, _message, info = self.device_service.test_connection("SERIAL1", device_id)
+
+        self.assertTrue(success)
+        self.assertEqual(info["manufacturer"], "Google")
+        device = self.device_repository.get_device(device_id)
+        self.assertEqual(device["last_status"], "connected")
+        saved_info = json.loads(device["last_info_json"])
+        self.assertEqual(saved_info["model"], "Pixel 7")
+        self.assertEqual(saved_info["version"], "14")
+        self.assertEqual(saved_info["current_app"]["package"], "com.example.app")
+        self.assertEqual(saved_info["window_size"]["width"], 1080)
+        self.assertTrue(saved_info["screen_on"])
+
+    def test_device_maintenance_actions_save_files(self) -> None:
+        screenshot_path = Path(self.db_path).with_suffix(".png")
+        hierarchy_path = Path(self.db_path).with_suffix(".xml")
+
+        success, _message, saved_screenshot = self.device_service.capture_screenshot("SERIAL1", screenshot_path)
+        self.assertTrue(success)
+        self.assertEqual(Path(saved_screenshot), screenshot_path)
+        self.assertTrue(screenshot_path.exists())
+
+        success, _message, saved_hierarchy = self.device_service.dump_hierarchy("SERIAL1", hierarchy_path)
+        self.assertTrue(success)
+        self.assertEqual(Path(saved_hierarchy), hierarchy_path)
+        self.assertTrue(hierarchy_path.exists())
 
     def test_import_failure_cleans_up_partial_workflow(self) -> None:
         with self.assertRaises(ValueError):

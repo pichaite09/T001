@@ -80,6 +80,7 @@ class DatabaseManager:
             (11, self._migration_011_account_identity_case_sensitive),
             (12, self._migration_012_workflow_schedules),
             (13, self._migration_013_schedule_groups_and_priority),
+            (14, self._migration_014_device_runtime_info),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -522,3 +523,12 @@ class DatabaseManager:
             ON workflow_schedules(schedule_group_id, is_enabled, next_run_at, priority, id)
             """
         )
+
+    def _migration_014_device_runtime_info(self, connection: sqlite3.Connection) -> None:
+        if not self._column_exists(connection, "devices", "last_info_json"):
+            connection.execute(
+                """
+                ALTER TABLE devices
+                ADD COLUMN last_info_json TEXT NOT NULL DEFAULT '{}'
+                """
+            )
