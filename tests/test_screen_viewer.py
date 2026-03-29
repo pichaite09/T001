@@ -39,12 +39,18 @@ class ScreenViewerTests(unittest.TestCase):
         class _Service:
             def __init__(self, items: list[dict]) -> None:
                 self._items = [dict(item) for item in items]
+                self.stop_requests: list[tuple[list[int], str]] = []
 
             def list_workflows(self) -> list[dict]:
                 return [dict(item) for item in self._items]
 
             def execute_workflow(self, workflow_id: int, device_id: int) -> dict:
                 return {"success": True, "message": f"Workflow {workflow_id} on {device_id}"}
+
+            def request_stop_for_devices(self, device_ids: list[int], reason: str = "Workflow stopped by user") -> int:
+                normalized = [int(device_id) for device_id in device_ids]
+                self.stop_requests.append((normalized, reason))
+                return len(normalized)
 
         return _Service(workflows)
 
@@ -472,6 +478,7 @@ class ScreenViewerTests(unittest.TestCase):
         window._tiles[1].set_workflow_state("queued", "Demo Workflow")
         window.stop_workflow_run()
         self.assertTrue(runner.stopped)
+        self.assertEqual(service.stop_requests, [([1], "Stopped from Screen Wall")])
         self.assertEqual(window._tiles[0].workflow_state_label.text(), "Running")
         self.assertEqual(window._tiles[1].workflow_state_label.text(), "Stopped")
         self.assertIn("stopping workflow", window.status_label.text().lower())

@@ -83,6 +83,10 @@ class WorkflowExecutor:
         self._watcher_trigger_limit = max(50, len(self.watchers) * 20) if self.watchers else 0
         self._watcher_chain_limit = 10
 
+    def request_stop(self, reason: str = "Workflow stopped by user") -> None:
+        self._stop_requested = True
+        self._stop_reason = str(reason or "Workflow stopped by user")
+
     def run(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
         ordered_steps = sorted(steps, key=lambda item: (int(item["position"]), int(item["id"])))
         position_to_index = {int(step["position"]): index for index, step in enumerate(ordered_steps)}

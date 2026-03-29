@@ -1371,9 +1371,34 @@ class WorkflowService:
         self.watcher_telemetry_service = watcher_telemetry_service
         self.account_service = account_service
         self.upload_service = upload_service
+        self._active_executor_lock = threading.Lock()
+        self._active_executors_by_device: dict[int, set[WorkflowExecutor]] = {}
 
     def bind_upload_service(self, upload_service: UploadService) -> None:
         self.upload_service = upload_service
+
+    def _register_active_executor(self, device_id: int, executor: WorkflowExecutor) -> None:
+        with self._active_executor_lock:
+            self._active_executors_by_device.setdefault(int(device_id), set()).add(executor)
+
+    def _unregister_active_executor(self, device_id: int, executor: WorkflowExecutor) -> None:
+        with self._active_executor_lock:
+            active = self._active_executors_by_device.get(int(device_id))
+            if not active:
+                return
+            active.discard(executor)
+            if not active:
+                self._active_executors_by_device.pop(int(device_id), None)
+
+    def request_stop_for_devices(self, device_ids: list[int] | set[int], reason: str = "Workflow stopped by user") -> int:
+        targets = {int(device_id) for device_id in device_ids if int(device_id or 0) > 0}
+        executors: set[WorkflowExecutor] = set()
+        with self._active_executor_lock:
+            for device_id in targets:
+                executors.update(self._active_executors_by_device.get(device_id, set()))
+        for executor in executors:
+            executor.request_stop(reason)
+        return len(executors)
 
     def list_workflows(self) -> list[dict[str, Any]]:
         return self.workflow_repository.list_workflows()
@@ -1950,6 +1975,7 @@ class WorkflowService:
             device_record=device_record,
             shared_context=shared_context,
         )
+        self._register_active_executor(int(device_id), executor)
 
         execution_scope = "selected_step" if step_ids else "workflow"
         execution_name = (
@@ -2031,6 +2057,8 @@ class WorkflowService:
                 },
             )
             return {"success": False, "message": str(exc)}
+        finally:
+            self._unregister_active_executor(int(device_id), executor)
 
     def _combine_shared_context(
         self,

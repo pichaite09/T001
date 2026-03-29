@@ -1775,6 +1775,11 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             return
         self._workflow_stop_requested = True
         self._workflow_runner.request_stop()
+        if self.workflow_service is not None and self._workflow_running_device_ids:
+            self.workflow_service.request_stop_for_devices(
+                list(self._workflow_running_device_ids),
+                reason="Stopped from Screen Wall",
+            )
         for device_id in self._workflow_target_device_ids:
             if device_id in self._workflow_running_device_ids:
                 continue
