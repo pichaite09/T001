@@ -323,6 +323,74 @@ class ServicePhase4Tests(unittest.TestCase):
         device_platform = self.account_service.get_device_platform(device_platform_id)
         self.assertEqual(int(device_platform["current_account_id"]), account_id)
 
+    def test_shared_runtime_stop_can_interrupt_nested_switch_workflow(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)
+        self.service.save_step(
+            None,
+            switch_workflow_id,
+            1,
+            "Wait In Switch",
+            "wait",
+            json.dumps({"seconds": 1.5}),
+            True,
+        )
+        device_platform_id = self.account_service.save_device_platform(
+            None,
+            device_id,
+            "shopee",
+            "Shopee",
+            "com.shopee.th",
+            switch_workflow_id,
+            True,
+        )
+        self.account_service.save_account(
+            None,
+            device_platform_id,
+            "main-shop",
+            "shop_user",
+            "shop_login",
+            "",
+            "{}",
+            True,
+        )
+
+        main_workflow_id = self.service.save_workflow(None, "Main Workflow", "", True)
+        self.service.save_step(
+            None,
+            main_workflow_id,
+            1,
+            "Switch Account",
+            "switch_account",
+            json.dumps({"platform_key": "shopee", "account_name": "main-shop"}),
+            True,
+        )
+
+        holder: dict[str, dict] = {}
+
+        def runner() -> None:
+            holder["result"] = self.service.execute_workflow(main_workflow_id, device_id)
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+
+        deadline = time.time() + 3.0
+        active_task_id = ""
+        while time.time() < deadline:
+            tasks = self.service.list_active_runtime_tasks()
+            if tasks:
+                active_task_id = str(tasks[0].get("task_id") or "")
+                break
+            time.sleep(0.05)
+
+        self.assertTrue(active_task_id)
+        self.assertTrue(self.service.request_stop_for_runtime_task(active_task_id, reason="Stop nested workflow"))
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertIn("result", holder)
+        self.assertTrue(holder["result"]["success"])
+        self.assertIn("Stop nested workflow", holder["result"]["message"])
+
     def test_switch_account_resolves_alias_name(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
         switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)

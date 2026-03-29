@@ -1779,15 +1779,31 @@ class WorkflowService:
         if validation_errors:
             raise RuntimeError(f"{label} validation failed: " + "; ".join(validation_errors))
 
+        def nested_stop_checker() -> dict[str, Any]:
+            if getattr(executor, "_stop_requested", False):
+                return {
+                    "exists": True,
+                    "stop_requested": True,
+                    "cancel_requested": False,
+                    "control_reason": str(getattr(executor, "_stop_reason", "") or f"{label} stopped with parent workflow"),
+                }
+            checker = getattr(executor, "external_stop_checker", None)
+            if callable(checker):
+                payload = checker()
+                if isinstance(payload, dict):
+                    return payload
+            return {"exists": False, "stop_requested": False, "cancel_requested": False, "control_reason": ""}
+
         nested_executor = self._executor_for_runtime(
             device=executor.device,
             workflow=nested_workflow,
             device_record=executor.device_record,
             shared_context=shared_context,
+            external_stop_checker=nested_stop_checker,
         )
         summary = nested_executor.run(nested_steps)
         if summary.get("stopped_by_watcher"):
-            raise RuntimeError(str(summary.get("stop_reason") or f"{label} stopped by watcher"))
+            executor.request_stop(str(summary.get("stop_reason") or f"{label} stopped by watcher"))
         return nested_workflow, summary
 
     def _execute_switch_account_step(
