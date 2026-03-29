@@ -922,6 +922,22 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="branch_on_exists",
+        label="Branch On Exists",
+        description="Check whether an element exists and jump to different step positions when it is found or missing.",
+        template={
+            "resource_id": "com.example:id/loading",
+            "target_position_on_exists": 10,
+            "target_position_on_missing": 20,
+            "timeout": 1,
+        },
+        fields=(
+            *_selector_fields(),
+            StepField("target_position_on_exists", "Target Position On Exists", field_type="int", default=10, required=True, min_value=1),
+            StepField("target_position_on_missing", "Target Position On Missing", field_type="int", default=20, required=True, min_value=1),
+        ),
+    ),
+    StepDefinition(
         key="set_variable",
         label="Set Variable",
         description="Store a literal value, JSON object, template, or expression result in workflow context.",
@@ -1178,7 +1194,7 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         if min_seconds is not None and max_seconds is not None and min_seconds > max_seconds:
             errors.append("Min Seconds must be less than or equal to Max Seconds")
 
-    if step_type in {"wait_for_text", "assert_exists", "wait_for_element", "assert_text", "assert_state", "branch_on_state", "extract_text", "scroll_to_selector"}:
+    if step_type in {"wait_for_text", "assert_exists", "wait_for_element", "assert_text", "assert_state", "branch_on_state", "branch_on_exists", "extract_text", "scroll_to_selector"}:
         require_selector(definition.label)
 
     if step_type == "wait_for_element":
@@ -1303,6 +1319,14 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
             errors.append("Target Position On True must be greater than or equal to 1")
         if target_position_on_false is not None and target_position_on_false < 1:
             errors.append("Target Position On False must be greater than or equal to 1")
+
+    if step_type == "branch_on_exists":
+        target_position_on_exists = _safe_int(parameters.get("target_position_on_exists"), "Target Position On Exists", errors)
+        target_position_on_missing = _safe_int(parameters.get("target_position_on_missing"), "Target Position On Missing", errors)
+        if target_position_on_exists is not None and target_position_on_exists < 1:
+            errors.append("Target Position On Exists must be greater than or equal to 1")
+        if target_position_on_missing is not None and target_position_on_missing < 1:
+            errors.append("Target Position On Missing must be greater than or equal to 1")
 
     if step_type == "set_variable":
         variable_name = str(parameters.get("variable_name", "")).strip()
@@ -1434,6 +1458,17 @@ def validate_workflow_structure(steps: list[dict[str, Any]]) -> list[str]:
             for key, label in (
                 ("target_position_on_true", "target position on true"),
                 ("target_position_on_false", "target position on false"),
+            ):
+                target_position = int(parameters.get(key, 0) or 0)
+                if target_position not in positions:
+                    errors.append(
+                        f"Step {step['position']} '{step['name']}': {label} {target_position} does not exist"
+                    )
+
+        if step["step_type"] == "branch_on_exists":
+            for key, label in (
+                ("target_position_on_exists", "target position on exists"),
+                ("target_position_on_missing", "target position on missing"),
             ):
                 target_position = int(parameters.get(key, 0) or 0)
                 if target_position not in positions:

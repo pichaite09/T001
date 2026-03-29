@@ -130,6 +130,129 @@ class ViewerImageLabel(QtWidgets.QLabel):
         painter.end()
 
 
+class StatusVisualLabel(QtWidgets.QWidget):
+    _COLORS = {
+        "idle": ("#101c2d", "#26405d", "#94a3b8"),
+        "busy": ("#0f2342", "#1d4ed8", "#60a5fa"),
+        "success": ("#0e2a1d", "#15803d", "#86efac"),
+        "warning": ("#2f2305", "#ca8a04", "#fcd34d"),
+        "error": ("#301018", "#dc2626", "#fda4af"),
+    }
+
+    def __init__(self, text: str = "Status: idle", parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._text = ""
+        self._state = "idle"
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setFixedSize(28, 20)
+        self.setText(text)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:
+        normalized = str(text or "").strip() or "Status: idle"
+        self._text = normalized
+        self._state = self._infer_state(normalized)
+        self.setToolTip(normalized)
+        self.setStatusTip(normalized)
+        self.update()
+
+    def sizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(28, 20)
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return self.sizeHint()
+
+    def _infer_state(self, text: str) -> str:
+        lower = text.lower()
+        if any(keyword in lower for keyword in ("fail", "error", "unavailable", "not configured")):
+            return "error"
+        if any(
+            keyword in lower
+            for keyword in (
+                "no devices",
+                "no selected",
+                "select a workflow",
+                "stop already",
+                "paused",
+                "stopping",
+                "stopped",
+            )
+        ):
+            return "warning"
+        if any(keyword in lower for keyword in ("refreshing", "running", "reconnecting")):
+            return "busy"
+        if any(
+            keyword in lower
+            for keyword in (
+                "saved",
+                "opened realtime",
+                "refreshed",
+                "workflow finished",
+                "workflow completed",
+                "selected",
+                "selection cleared",
+                "brightness set",
+                "home sent",
+                "back sent",
+                "recent apps sent",
+                "preset ",
+                "resolution set",
+                "using scrcpy",
+                "loaded",
+            )
+        ):
+            return "success"
+        return "idle"
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        background, border, foreground = self._COLORS.get(self._state, self._COLORS["idle"])
+        painter.setPen(QtGui.QPen(QtGui.QColor(border), 1))
+        painter.setBrush(QtGui.QColor(background))
+        painter.drawRoundedRect(rect, 9, 9)
+
+        icon_rect = rect.adjusted(6, 4, -6, -4)
+        pen = QtGui.QPen(QtGui.QColor(foreground), 2, QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor(foreground))
+
+        if self._state == "success":
+            path = QtGui.QPainterPath()
+            path.moveTo(icon_rect.left() + 1, icon_rect.center().y())
+            path.lineTo(icon_rect.left() + 5, icon_rect.bottom() - 1)
+            path.lineTo(icon_rect.right() - 1, icon_rect.top() + 1)
+            painter.drawPath(path)
+        elif self._state == "error":
+            painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
+            painter.drawLine(icon_rect.topRight(), icon_rect.bottomLeft())
+        elif self._state == "warning":
+            center_x = icon_rect.center().x()
+            painter.drawLine(center_x, icon_rect.top(), center_x, icon_rect.bottom() - 4)
+            painter.drawPoint(center_x, icon_rect.bottom())
+        elif self._state == "busy":
+            bar_width = 2
+            spacing = 2
+            heights = (4, 7, 10)
+            start_x = icon_rect.center().x() - ((bar_width * len(heights)) + (spacing * (len(heights) - 1))) // 2
+            for index, height in enumerate(heights):
+                x = start_x + (index * (bar_width + spacing))
+                bar_rect = QtCore.QRectF(
+                    x,
+                    icon_rect.bottom() - height,
+                    bar_width,
+                    height,
+                )
+                painter.drawRoundedRect(bar_rect, 1, 1)
+        else:
+            painter.drawEllipse(icon_rect.center(), 3, 3)
+        painter.end()
+
+
 class FrameRefreshSignals(QtCore.QObject):
     finished = QtCore.Signal(object, object)
 
@@ -1251,8 +1374,8 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         ):
             self.zoom_combo.addItem(label, value)
         self.zoom_combo.setCurrentIndex(max(self.zoom_combo.findData(1.0), 0))
-        self.status_label = QtWidgets.QLabel("Status: idle")
-        self.status_label.setObjectName("subtitleLabel")
+        self.status_label = StatusVisualLabel("Status: idle")
+        self.status_label.setObjectName("wallStatusIndicator")
         for button in (
             self.pause_button,
             self.reconnect_button,
@@ -1331,7 +1454,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         )
         summary_row.addWidget(self.device_count_chip, 0)
         summary_row.addWidget(self.selection_count_chip, 0)
-        summary_row.addWidget(self.status_label, 1)
+        summary_row.addWidget(self.status_label, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         summary_row.addStretch(1)
         toolbar_layout.addLayout(summary_row)
 

@@ -391,6 +391,40 @@ class EngineStepSuiteTests(unittest.TestCase):
         self.assertFalse(result["actual"])
         self.assertEqual(result["jump_to_position"], 20)
 
+    def test_branch_on_exists_step_exists_branch(self) -> None:
+        self.device.register_selector(
+            FakeSelector(exists_states=[True]),
+            resourceId="com.ss.android.ugc.trill:id/n1f",
+        )
+        result = self._execute(
+            "branch_on_exists",
+            {
+                "resource_id": "com.ss.android.ugc.trill:id/n1f",
+                "target_position_on_exists": 2,
+                "target_position_on_missing": 5,
+                "timeout": 1,
+            },
+        )
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["jump_to_position"], 2)
+
+    def test_branch_on_exists_step_missing_branch(self) -> None:
+        self.device.register_selector(
+            FakeSelector(exists_states=[False]),
+            resourceId="com.ss.android.ugc.trill:id/n1f",
+        )
+        result = self._execute(
+            "branch_on_exists",
+            {
+                "resource_id": "com.ss.android.ugc.trill:id/n1f",
+                "target_position_on_exists": 2,
+                "target_position_on_missing": 5,
+                "timeout": 0,
+            },
+        )
+        self.assertFalse(result["exists"])
+        self.assertEqual(result["jump_to_position"], 5)
+
     def test_set_variable_step(self) -> None:
         runtime = self._runtime("set_variable")
         result = self.executor.execute_step(

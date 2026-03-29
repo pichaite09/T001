@@ -232,6 +232,7 @@ class WorkflowExecutor:
             "assert_text": self._assert_text,
             "assert_state": self._assert_state,
             "branch_on_state": self._branch_on_state,
+            "branch_on_exists": self._branch_on_exists,
             "set_variable": self._set_variable,
             "extract_text": self._extract_text,
             "chance_gate": self._chance_gate,
@@ -1636,6 +1637,22 @@ class WorkflowExecutor:
             "jump_to_position": jump_to_position,
             "target_position_on_true": target_position_on_true,
             "target_position_on_false": target_position_on_false,
+        }
+
+    def _branch_on_exists(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        target_type, target, timeout = self._selector(parameters)
+        if not target:
+            raise RuntimeError("branch_on_exists requires text, resource_id, xpath or description")
+        exists = self._wait_on_target(target_type, target, timeout) if timeout > 0 else self._target_exists_now(target_type, target)
+        target_position_on_exists = int(parameters["target_position_on_exists"])
+        target_position_on_missing = int(parameters["target_position_on_missing"])
+        jump_to_position = target_position_on_exists if exists else target_position_on_missing
+        return {
+            "selector_type": target_type,
+            "exists": exists,
+            "jump_to_position": jump_to_position,
+            "target_position_on_exists": target_position_on_exists,
+            "target_position_on_missing": target_position_on_missing,
         }
 
     def _set_variable(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
