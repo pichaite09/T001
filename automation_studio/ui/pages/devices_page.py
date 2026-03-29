@@ -11,6 +11,84 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from automation_studio.ui.widgets import CardFrame, make_button, make_form_label
 
 
+class DeviceEditorDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        name: str = "",
+        serial: str = "",
+        notes: str = "",
+        is_edit: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle("Edit Device" if is_edit else "Add Device")
+        self.resize(520, 360)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        title = QtWidgets.QLabel("Edit Device" if is_edit else "Add Device")
+        title.setObjectName("titleLabel")
+        subtitle = QtWidgets.QLabel("Enter device details for USB, emulator, or wireless ADB connections.")
+        subtitle.setObjectName("subtitleLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        form = QtWidgets.QFormLayout()
+        self.name_input = QtWidgets.QLineEdit(name)
+        self.name_input.setPlaceholderText("Pixel 7 Pro")
+        self.serial_input = QtWidgets.QLineEdit(serial)
+        self.serial_input.setPlaceholderText("emulator-5554 or 192.168.1.10:5555")
+        self.notes_input = QtWidgets.QTextEdit()
+        self.notes_input.setPlainText(notes)
+        self.notes_input.setFixedHeight(90)
+        self.notes_input.setPlaceholderText("Notes for testing, schedules, or device groups")
+        form.addRow("Name", self.name_input)
+        form.addRow("Serial / ADB Address", self.serial_input)
+        form.addRow("Notes", self.notes_input)
+        layout.addLayout(form)
+
+        self.serial_hint_label = QtWidgets.QLabel()
+        self.serial_hint_label.setObjectName("subtitleLabel")
+        self.serial_hint_label.setWordWrap(True)
+        layout.addWidget(self.serial_hint_label)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.serial_input.textChanged.connect(self._update_serial_hint)
+        self._update_serial_hint(self.serial_input.text())
+
+    def values(self) -> dict[str, str]:
+        return {
+            "name": self.name_input.text().strip(),
+            "serial": self.serial_input.text().strip(),
+            "notes": self.notes_input.toPlainText().strip(),
+        }
+
+    def _update_serial_hint(self, serial: str) -> None:
+        serial = str(serial or "").strip()
+        if not serial:
+            text = "Supports ADB serials, emulator IDs, and wireless ADB in IP:PORT format."
+        elif re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}", serial):
+            text = "Detected wireless ADB format."
+        elif serial.startswith("emulator-"):
+            text = "Detected emulator serial."
+        elif re.fullmatch(r"[A-Za-z0-9._:-]+", serial):
+            text = "Serial format looks valid."
+        else:
+            text = "Check serial format. Use an ADB serial or IP:PORT."
+        self.serial_hint_label.setText(text)
+
+
 class DevicesPage(QtWidgets.QWidget):
     devices_changed = QtCore.Signal()
     open_screen_requested = QtCore.Signal()
@@ -97,12 +175,29 @@ class DevicesPage(QtWidgets.QWidget):
         table_layout.setSpacing(12)
 
         action_row = QtWidgets.QHBoxLayout()
+        self.new_button = make_button("New", "secondary")
+        self.save_button = make_button("Edit Device")
+        self.delete_button = make_button("Delete", "danger")
         self.refresh_button = make_button("Refresh", "secondary")
         self.refresh_info_button = make_button("Refresh Info", "secondary")
         self.test_button = make_button("Test Connection")
+        action_row.addWidget(self.new_button)
+        action_row.addWidget(self.save_button)
+        action_row.addWidget(self.delete_button)
         action_row.addWidget(self.refresh_button)
         action_row.addWidget(self.refresh_info_button)
         action_row.addWidget(self.test_button)
+        for button in (
+            self.new_button,
+            self.save_button,
+            self.delete_button,
+            self.refresh_button,
+            self.refresh_info_button,
+            self.test_button,
+        ):
+            button.setMinimumHeight(0)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Fixed)
         action_row.addStretch(1)
         table_layout.addLayout(action_row)
 
@@ -157,10 +252,10 @@ class DevicesPage(QtWidgets.QWidget):
         details_splitter.setHandleWidth(10)
 
         form_card = CardFrame()
-        form_card.setMinimumHeight(440)
+        form_card.setMinimumHeight(340)
         form_layout = QtWidgets.QVBoxLayout(form_card)
         form_layout.setContentsMargins(18, 18, 18, 18)
-        form_layout.setSpacing(8)
+        form_layout.setSpacing(6)
 
         form_title = QtWidgets.QLabel("Device Details")
         form_title.setObjectName("subtitleLabel")
@@ -172,6 +267,8 @@ class DevicesPage(QtWidgets.QWidget):
         self.detail_labels: dict[str, QtWidgets.QLabel] = {}
         for row, (key, label_text) in enumerate(
             (
+                ("name", "Name"),
+                ("serial", "Serial"),
                 ("status", "Status"),
                 ("type", "Connection Type"),
                 ("last_seen", "Last Seen"),
@@ -199,58 +296,37 @@ class DevicesPage(QtWidgets.QWidget):
         maintenance_row.addWidget(self.screenshot_button)
         maintenance_row.addWidget(self.dump_hierarchy_button)
         maintenance_row.addWidget(self.open_artifacts_button)
+        for button in (
+            self.screenshot_button,
+            self.dump_hierarchy_button,
+            self.open_artifacts_button,
+        ):
+            button.setMinimumHeight(0)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Fixed)
         form_layout.addLayout(maintenance_row)
-
-        form_layout.addWidget(make_form_label("Name"))
-        self.name_input = QtWidgets.QLineEdit()
-        self.name_input.setPlaceholderText("Pixel 7 Pro")
-        form_layout.addWidget(self.name_input)
-
-        form_layout.addWidget(make_form_label("Serial / ADB Address"))
-        self.serial_input = QtWidgets.QLineEdit()
-        self.serial_input.setPlaceholderText("emulator-5554 หรือ 192.168.1.10:5555")
-        form_layout.addWidget(self.serial_input)
-
-        self.serial_hint_label = QtWidgets.QLabel("รองรับ serial ของ ADB, emulator, และการเชื่อมต่อแบบ IP:PORT")
-        self.serial_hint_label.setObjectName("subtitleLabel")
-        self.serial_hint_label.setWordWrap(True)
-        form_layout.addWidget(self.serial_hint_label)
-
-        form_layout.addWidget(make_form_label("Notes"))
-        self.notes_input = QtWidgets.QTextEdit()
-        self.notes_input.setPlaceholderText("เช่น ใช้กับงานทดสอบ, เครื่องสำหรับ schedule กลางคืน, หรือกลุ่มอุปกรณ์เฉพาะ")
-        self.notes_input.setFixedHeight(68)
-        form_layout.addWidget(self.notes_input)
-
-        button_row = QtWidgets.QHBoxLayout()
-        self.new_button = make_button("New", "secondary")
-        self.save_button = make_button("Save Device")
-        self.delete_button = make_button("Delete", "danger")
-        button_row.addWidget(self.new_button)
-        button_row.addWidget(self.save_button)
-        button_row.addWidget(self.delete_button)
-        form_layout.addLayout(button_row)
 
         self.status_label = QtWidgets.QLabel("เลือกอุปกรณ์หรือกรอกข้อมูลใหม่เพื่อเริ่มต้น")
         self.status_label.setWordWrap(True)
         self.status_label.setObjectName("subtitleLabel")
+        self.status_label.setMaximumHeight(36)
         form_layout.addWidget(self.status_label)
         details_splitter.addWidget(form_card)
 
         activity_card = CardFrame()
-        activity_card.setMinimumHeight(110)
-        activity_card.setMaximumHeight(160)
+        activity_card.setMinimumHeight(180)
+        activity_card.setMaximumHeight(260)
         activity_layout = QtWidgets.QVBoxLayout(activity_card)
         activity_layout.setContentsMargins(18, 18, 18, 18)
         activity_layout.setSpacing(10)
         activity_layout.addWidget(make_form_label("Device Activity"))
         self.activity_list = QtWidgets.QListWidget()
-        self.activity_list.setMinimumHeight(64)
+        self.activity_list.setMinimumHeight(120)
         activity_layout.addWidget(self.activity_list, 1)
         details_splitter.addWidget(activity_card)
-        details_splitter.setStretchFactor(0, 5)
-        details_splitter.setStretchFactor(1, 1)
-        details_splitter.setSizes([560, 120])
+        details_splitter.setStretchFactor(0, 3)
+        details_splitter.setStretchFactor(1, 2)
+        details_splitter.setSizes([420, 220])
 
         content.addWidget(details_splitter)
         content.setStretchFactor(0, 3)
@@ -258,8 +334,8 @@ class DevicesPage(QtWidgets.QWidget):
 
         self.refresh_button.clicked.connect(self.load_devices)
         self.refresh_info_button.clicked.connect(self.refresh_device_info)
-        self.new_button.clicked.connect(self.clear_form)
-        self.save_button.clicked.connect(self.save_device)
+        self.new_button.clicked.connect(self.create_device)
+        self.save_button.clicked.connect(self.edit_device)
         self.delete_button.clicked.connect(self.delete_device)
         self.test_button.clicked.connect(self.test_connection)
         self.screenshot_button.clicked.connect(self.capture_screenshot)
@@ -395,25 +471,18 @@ class DevicesPage(QtWidgets.QWidget):
         has_selection = device is not None
         self._update_action_buttons(has_selection)
         if device is None:
-            self.name_input.clear()
-            self.serial_input.clear()
-            self.notes_input.clear()
-            self.serial_hint_label.setText("รองรับ serial ของ ADB, emulator, และการเชื่อมต่อแบบ IP:PORT")
             self.status_label.setText("เลือกอุปกรณ์หรือกรอกข้อมูลใหม่เพื่อเริ่มต้น")
             for label in self.detail_labels.values():
                 label.setText("-")
             self.activity_list.clear()
             return
 
-        self.name_input.setText(str(device.get("name") or ""))
-        self.serial_input.setText(str(device.get("serial") or ""))
-        self.notes_input.setPlainText(str(device.get("notes") or ""))
-        self.serial_hint_label.setText(self._serial_validation_message(str(device.get("serial") or "")))
-
         status = str(device.get("last_status") or "unknown")
         runtime_info = self._saved_runtime_info(device)
         current_app = runtime_info.get("current_app", {})
         window_size = runtime_info.get("window_size", {})
+        self.detail_labels["name"].setText(str(device.get("name") or "-"))
+        self.detail_labels["serial"].setText(str(device.get("serial") or "-"))
         self.detail_labels["status"].setText(self._status_label(status))
         self.detail_labels["type"].setText(self._connection_type_label(str(device.get("serial") or "")))
         self.detail_labels["last_seen"].setText(str(device.get("last_seen") or "-"))
@@ -457,21 +526,42 @@ class DevicesPage(QtWidgets.QWidget):
         self._update_detail_panel(None)
         self.status_label.setText("พร้อมเพิ่มอุปกรณ์ใหม่")
 
-    def save_device(self) -> None:
-        name = self.name_input.text().strip()
-        serial = self.serial_input.text().strip()
-        notes = self.notes_input.toPlainText().strip()
+    def create_device(self) -> None:
+        self._open_device_editor(None)
+
+    def edit_device(self) -> None:
+        device = self._current_device_record()
+        if device is None or self.current_device_id is None:
+            QtWidgets.QMessageBox.information(self, "Select device", "Please select a device first.")
+            return
+        self._open_device_editor(device)
+
+    def _open_device_editor(self, device: dict[str, Any] | None) -> None:
+        dialog = DeviceEditorDialog(
+            self,
+            name=str(device.get("name") or "") if device else "",
+            serial=str(device.get("serial") or "") if device else "",
+            notes=str(device.get("notes") or "") if device else "",
+            is_edit=device is not None,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        self._save_device_values(values["name"], values["serial"], values["notes"], device)
+
+    def _save_device_values(self, name: str, serial: str, notes: str, device: dict[str, Any] | None = None) -> None:
         validation_error = self._validate_device_input(name, serial)
         if validation_error:
             QtWidgets.QMessageBox.warning(self, "Missing data", validation_error)
             return
         try:
-            device_id = self.device_service.save_device(self.current_device_id, name, serial, notes)
+            target_id = int(device["id"]) if device is not None else None
+            device_id = self.device_service.save_device(target_id, name, serial, notes)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save failed", str(exc))
             return
         self.current_device_id = device_id
-        self.status_label.setText("บันทึกอุปกรณ์เรียบร้อย")
+        self.status_label.setText("Device saved successfully")
         self._log_device_event("device_saved", "Saved device record", {"serial": serial})
         self.load_devices()
 
@@ -486,7 +576,7 @@ class DevicesPage(QtWidgets.QWidget):
         if confirmation != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         deleted_id = self.current_device_id
-        deleted_serial = self.serial_input.text().strip()
+        deleted_serial = self._selected_serial()
         self.device_service.delete_device(self.current_device_id)
         self.current_device_id = None
         self.clear_form()
@@ -505,7 +595,7 @@ class DevicesPage(QtWidgets.QWidget):
         self._run_runtime_refresh(show_dialog=True, action_label="ทดสอบการเชื่อมต่อ", log_success_status="device_connected")
 
     def _run_runtime_refresh(self, show_dialog: bool, action_label: str, log_success_status: str) -> None:
-        serial = self.serial_input.text().strip()
+        serial = self._selected_serial()
         if not serial:
             QtWidgets.QMessageBox.warning(self, "Missing serial", "กรุณากรอก Serial / ADB Address")
             return
@@ -539,7 +629,7 @@ class DevicesPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Connection failed", f"{action_label} ไม่สำเร็จ\n{message}")
 
     def capture_screenshot(self) -> None:
-        serial = self.serial_input.text().strip()
+        serial = self._selected_serial()
         if not serial:
             QtWidgets.QMessageBox.warning(self, "Missing serial", "กรุณากรอก Serial / ADB Address")
             return
@@ -557,7 +647,7 @@ class DevicesPage(QtWidgets.QWidget):
 
     def _open_selected_screen_viewer_legacy(self) -> None:
         device = self._current_device_record()
-        serial = self.serial_input.text().strip()
+        serial = self._selected_serial()
         if device is None or not serial:
             QtWidgets.QMessageBox.warning(self, "Missing device", "กรุณาเลือกอุปกรณ์และตรวจสอบ Serial / ADB Address")
             return
@@ -581,7 +671,7 @@ class DevicesPage(QtWidgets.QWidget):
         return bool(self._devices)
 
     def dump_hierarchy(self) -> None:
-        serial = self.serial_input.text().strip()
+        serial = self._selected_serial()
         if not serial:
             QtWidgets.QMessageBox.warning(self, "Missing serial", "กรุณากรอก Serial / ADB Address")
             return
@@ -622,6 +712,10 @@ class DevicesPage(QtWidgets.QWidget):
         if self.current_device_id is None:
             return None
         return next((item for item in self._devices if int(item["id"]) == self.current_device_id), None)
+
+    def _selected_serial(self) -> str:
+        device = self._current_device_record()
+        return str(device.get("serial") or "").strip() if device else ""
 
     def _saved_runtime_info(self, device: dict[str, Any]) -> dict[str, Any]:
         payload = str(device.get("last_info_json") or "").strip()
@@ -686,6 +780,7 @@ class DevicesPage(QtWidgets.QWidget):
 
     def _update_action_buttons(self, enabled: bool) -> None:
         for button in (
+            self.save_button,
             self.refresh_info_button,
             self.test_button,
             self.delete_button,
