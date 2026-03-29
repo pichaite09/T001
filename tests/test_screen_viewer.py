@@ -154,6 +154,32 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertEqual(captured, ["SERIAL1"])
         tile.deleteLater()
 
+    def test_tile_skips_capture_when_adb_reports_device_offline(self) -> None:
+        tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
+        tile._host_device_is_ready = lambda: (False, "offline")  # type: ignore[method-assign]
+        tile._ensure_connected = lambda: self.fail("capture should not try to connect when adb says offline")  # type: ignore[method-assign]
+        payload = tile.capture_frame_payload()
+        self.assertFalse(payload["ok"])
+        self.assertIn("offline", payload["error"])
+        tile.deleteLater()
+
+    def test_tile_uses_cooldown_after_failed_capture(self) -> None:
+        tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
+        calls = {"count": 0}
+
+        def _offline_check():
+            calls["count"] += 1
+            return False, "offline"
+
+        tile._host_device_is_ready = _offline_check  # type: ignore[method-assign]
+        first = tile.capture_frame_payload()
+        second = tile.capture_frame_payload()
+        self.assertFalse(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertTrue(second.get("cooldown"))
+        self.assertEqual(calls["count"], 1)
+        tile.deleteLater()
+
     def test_open_detail_viewer_reuses_window(self) -> None:
         window = ScreenViewerWindow(
             devices=[{"id": 1, "name": "Phone A", "serial": "SERIAL1"}],

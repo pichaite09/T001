@@ -6,6 +6,8 @@ import io
 import os
 import re
 import shutil
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -716,6 +718,8 @@ class DeviceScreenTile(QtWidgets.QFrame):
     DEFAULT_SCREEN_RATIO = 9 / 19.5
     IMAGE_FRAME_PADDING = 0
     TILE_SIDE_MARGIN = 12
+    OFFLINE_RETRY_COOLDOWN_SECONDS = 5.0
+    ADB_STATE_TIMEOUT_SECONDS = 1.0
 
     save_requested = QtCore.Signal(object)
     realtime_requested = QtCore.Signal(object)
@@ -735,6 +739,7 @@ class DeviceScreenTile(QtWidgets.QFrame):
         self._zoom_factor = 1.0
         self._resolution_scale = 1.0
         self._selected = False
+        self._next_refresh_allowed_at = 0.0
         self._status_badge_state = "connected"
         self._workflow_state_key = "idle"
         self._workflow_state_message = ""
@@ -836,6 +841,26 @@ class DeviceScreenTile(QtWidgets.QFrame):
     def _ensure_connected(self):
         return self._device if self._device is not None else self._connect_device()
 
+    def _host_device_is_ready(self) -> tuple[bool, str]:
+        if not self.serial:
+            return False, "Device serial is missing"
+        try:
+            result = subprocess.run(
+                ["adb", "-s", self.serial, "get-state"],
+                capture_output=True,
+                text=True,
+                timeout=self.ADB_STATE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"ADB unavailable: {exc}"
+        state = str(result.stdout or result.stderr or "").strip().lower()
+        if result.returncode == 0 and state == "device":
+            return True, ""
+        if not state:
+            state = f"adb get-state failed ({result.returncode})"
+        return False, state
+
     def _capture_to_bytes(self, capture) -> bytes:
         if isinstance(capture, (bytes, bytearray)):
             return bytes(capture)
@@ -876,11 +901,23 @@ class DeviceScreenTile(QtWidgets.QFrame):
         return data, source_size, image.size()
 
     def capture_frame_payload(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if now < self._next_refresh_allowed_at:
+            remaining = max(self._next_refresh_allowed_at - now, 0.0)
+            return {
+                "ok": False,
+                "error": f"Device reconnect cooldown ({remaining:.1f}s remaining)",
+                "cooldown": True,
+            }
         try:
+            ready, reason = self._host_device_is_ready()
+            if not ready:
+                raise RuntimeError(reason or "Device is offline")
             device = self._ensure_connected()
             capture = device.screenshot()
             data = self._capture_to_bytes(capture)
             prepared_data, source_size, display_size = self._prepare_frame_bytes(data)
+            self._next_refresh_allowed_at = 0.0
             return {
                 "ok": True,
                 "data": prepared_data,
@@ -890,6 +927,7 @@ class DeviceScreenTile(QtWidgets.QFrame):
             }
         except Exception as exc:
             self._device = None
+            self._next_refresh_allowed_at = time.monotonic() + self.OFFLINE_RETRY_COOLDOWN_SECONDS
             return {"ok": False, "error": str(exc)}
 
     def apply_frame_payload(self, payload: dict[str, Any]) -> None:
@@ -930,6 +968,7 @@ class DeviceScreenTile(QtWidgets.QFrame):
     def force_reconnect(self) -> None:
         self._device = None
         self._failure_streak = 0
+        self._next_refresh_allowed_at = 0.0
         self.size_label.setText("-")
         self.size_label.setToolTip("")
         self._set_status_badge("reconnecting")
