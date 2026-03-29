@@ -14,6 +14,7 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    RuntimeRepository,
     TelemetryRepository,
     UploadRepository,
     WatcherRepository,
@@ -80,6 +81,7 @@ class UploadTests(unittest.TestCase):
         self.account_repository = AccountRepository(self.db)
         self.upload_repository = UploadRepository(self.db)
         self.log_repository = LogRepository(self.db)
+        self.runtime_repository = RuntimeRepository(self.db)
         self.telemetry_repository = TelemetryRepository(self.db)
         self.watcher_repository = WatcherRepository(self.db)
         self.watcher_telemetry_repository = WatcherTelemetryRepository(self.db)
@@ -109,6 +111,8 @@ class UploadTests(unittest.TestCase):
             self.watcher_service,
             self.watcher_telemetry_service,
             self.account_service,
+            runtime_repository=self.runtime_repository,
+            runtime_source="test_uploads",
         )
         self.upload_service = UploadService(
             self.upload_repository,
@@ -116,6 +120,7 @@ class UploadTests(unittest.TestCase):
             self.workflow_repository,
             self.account_service,
             self.workflow_service,
+            runtime_repository=self.runtime_repository,
         )
         self.workflow_service.bind_upload_service(self.upload_service)
 
@@ -190,6 +195,43 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(metadata["upload_job_id"], upload_job_id)
         self.assertEqual(metadata["upload_code_product"], "SKU-123")
         self.assertTrue(any(log["status"] == "upload_success" for log in logs))
+
+    def test_request_stop_upload_job_marks_shared_runtime_workflow_task(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        workflow_id = self.workflow_service.save_workflow(None, "Upload Workflow", "", True)
+        upload_job_id = self.upload_service.save_upload_job(
+            None,
+            device_id=device_id,
+            device_platform_id=None,
+            account_id=None,
+            workflow_id=workflow_id,
+            code_product="SKU-STOP",
+            link_product="https://example.com/stop",
+            title="Stop Upload",
+            description="",
+            tags_text="",
+            video_url="https://cdn.example.com/stop.mp4",
+        )
+        self.upload_repository.mark_upload_started(upload_job_id)
+        self.runtime_repository.upsert_task(
+            task_id="workflow-runtime:test-upload",
+            category="workflow",
+            source="api_server",
+            status="running",
+            workflow_id=workflow_id,
+            workflow_name="Upload Workflow",
+            device_id=device_id,
+            device_name="Phone",
+            upload_job_id=upload_job_id,
+            detail="Upload job is running",
+        )
+
+        result = self.upload_service.request_stop_upload_job(upload_job_id, reason="Stop from runtime")
+
+        self.assertEqual(result, "stopping")
+        control = self.runtime_repository.task_control("workflow-runtime:test-upload")
+        self.assertTrue(control["stop_requested"])
+        self.assertEqual(control["control_reason"], "Stop from runtime")
 
     def test_execute_upload_job_persists_downloaded_local_video_path(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")

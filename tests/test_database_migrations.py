@@ -15,7 +15,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             db = DatabaseManager(db_path)
             db.init_schema()
 
-            self.assertEqual(db.current_schema_version(), 17)
+            self.assertEqual(db.current_schema_version(), 18)
 
             with db.connection() as connection:
                 device_columns = {
@@ -77,6 +77,10 @@ class DatabaseMigrationTests(unittest.TestCase):
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(runtime_locks)").fetchall()
                 }
+                runtime_task_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(runtime_tasks)").fetchall()
+                }
 
             self.assertIn("last_info_json", device_columns)
             self.assertIn("definition_version", workflow_columns)
@@ -98,6 +102,12 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertIn("lock_key", runtime_lock_columns)
             self.assertIn("owner_id", runtime_lock_columns)
             self.assertIn("expires_at", runtime_lock_columns)
+            self.assertIn("task_id", runtime_task_columns)
+            self.assertIn("category", runtime_task_columns)
+            self.assertIn("source", runtime_task_columns)
+            self.assertIn("stop_requested", runtime_task_columns)
+            self.assertIn("cancel_requested", runtime_task_columns)
+            self.assertIn("control_reason", runtime_task_columns)
             self.assertTrue(telemetry_tables)
             self.assertEqual(len(watcher_tables), 11)
         finally:

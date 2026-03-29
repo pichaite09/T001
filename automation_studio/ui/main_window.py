@@ -10,6 +10,7 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    RuntimeRepository,
     ScheduleGroupRepository,
     ScheduleRepository,
     ScheduleRunRepository,
@@ -33,6 +34,7 @@ from automation_studio.services import (
 from automation_studio.ui.pages.accounts_page import AccountsPage
 from automation_studio.ui.pages.devices_page import DevicesPage
 from automation_studio.ui.pages.log_page import LogPage
+from automation_studio.ui.pages.runtime_page import RuntimePage
 from automation_studio.ui.pages.schedules_page import ScheduleRunThread, SchedulesPage
 from automation_studio.ui.pages.uploads_page import UploadsPage
 from automation_studio.ui.pages.watchers_page import WatchersPage
@@ -47,6 +49,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Android Automation Studio")
         self._schedule_runners: dict[int, ScheduleRunThread] = {}
         self._queued_schedule_runs: dict[int, tuple[str, bool]] = {}
+        self._schedule_run_metadata: dict[int, dict] = {}
+        self._queued_schedule_metadata: dict[int, dict] = {}
         self._scheduler_startup_recovery_pending = True
         self._init_services()
         self._build_ui()
@@ -66,6 +70,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.schedule_repository = ScheduleRepository(self.db)
         self.schedule_run_repository = ScheduleRunRepository(self.db)
         self.log_repository = LogRepository(self.db)
+        self.runtime_repository = RuntimeRepository(self.db)
         self.telemetry_repository = TelemetryRepository(self.db)
         self.watcher_repository = WatcherRepository(self.db)
         self.watcher_telemetry_repository = WatcherTelemetryRepository(self.db)
@@ -81,6 +86,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.device_repository,
             self.workflow_repository,
             self.account_service,
+            runtime_repository=self.runtime_repository,
         )
         self.log_service = LogService(self.log_repository)
         self.telemetry_service = TelemetryService(self.telemetry_repository)
@@ -101,6 +107,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.watcher_service,
             self.watcher_telemetry_service,
             self.account_service,
+            runtime_repository=self.runtime_repository,
+            runtime_source="main_ui",
         )
         self.workflow_service.bind_upload_service(self.upload_service)
         self.upload_service.bind_workflow_service(self.workflow_service)
@@ -135,7 +143,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.nav_list = QtWidgets.QListWidget()
         self.nav_list.setObjectName("navList")
-        self.nav_list.addItems(["Devices", "Accounts", "Uploads", "Workflow", "Schedules", "Watchers", "Log"])
+        self.nav_list.addItems(["Devices", "Accounts", "Uploads", "Workflow", "Schedules", "Runtime", "Watchers", "Log"])
         self.nav_list.setCurrentRow(0)
         nav_layout.addWidget(self.nav_list, 1)
 
@@ -180,6 +188,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.device_service,
             self.account_service,
         )
+        self.runtime_page = RuntimePage(
+            workflow_provider=self._runtime_workflow_tasks,
+            upload_provider=self._runtime_upload_tasks,
+            schedule_provider=self._runtime_schedule_tasks,
+            stop_workflow_handler=self._stop_runtime_workflow_task,
+            stop_upload_handler=self._stop_runtime_upload_task,
+            cancel_upload_handler=self._cancel_runtime_upload_task,
+            stop_schedule_handler=self._stop_runtime_schedule_task,
+            cancel_schedule_handler=self._cancel_runtime_schedule_task,
+        )
         self.watchers_page = WatchersPage(
             self.watcher_service,
             self.workflow_service,
@@ -200,6 +218,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stack.addWidget(self.uploads_page)
         self.stack.addWidget(self.workflow_page)
         self.stack.addWidget(self.schedules_page)
+        self.stack.addWidget(self.runtime_page)
         self.stack.addWidget(self.watchers_page)
         self.stack.addWidget(self.log_page)
         content_layout.addWidget(self.stack)
@@ -226,12 +245,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_page.workflows_changed.connect(self.log_page.refresh_filters)
         self.workflow_page.workflows_changed.connect(self.watchers_page.load_watchers)
         self.workflow_page.logs_changed.connect(self.log_page.load_logs)
+        self.workflow_page.logs_changed.connect(self.runtime_page.refresh_runtime)
         self.schedules_page.schedules_changed.connect(self.log_page.load_logs)
         self.schedules_page.logs_changed.connect(self.log_page.load_logs)
         self.schedules_page.run_requested.connect(self._run_schedule_now)
         self.schedules_page.toggle_requested.connect(self._toggle_schedule_enabled)
         self.uploads_page.uploads_changed.connect(self.log_page.load_logs)
         self.uploads_page.logs_changed.connect(self.log_page.load_logs)
+        self.uploads_page.logs_changed.connect(self.runtime_page.refresh_runtime)
         self.watchers_page.watchers_changed.connect(self.log_page.refresh_filters)
         self.watchers_page.watchers_changed.connect(self.workflow_page.load_linked_watchers)
         self.watchers_page.logs_changed.connect(self.log_page.load_logs)
@@ -240,6 +261,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_screen_wall_button.clicked.connect(self.devices_page.open_screen_viewer)
         self._sync_screen_wall_button()
         self._refresh_schedule_runtime_state()
+        self.runtime_page.refresh_runtime()
 
     def _sync_screen_wall_button(self) -> None:
         self.open_screen_wall_button.setEnabled(self.devices_page.has_devices())
@@ -299,6 +321,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 str(decision.get("trigger_source") or trigger_source),
                 bool(decision.get("advance_schedule", advance_schedule)),
             )
+            schedule = self.scheduler_service.get_schedule(schedule_id) or {}
+            self._queued_schedule_metadata[schedule_id] = {
+                "task_id": f"schedule-queued:{schedule_id}",
+                "schedule_id": schedule_id,
+                "schedule_name": str(schedule.get("name") or f"Schedule #{schedule_id}"),
+                "workflow_name": str(schedule.get("workflow_name") or "-"),
+                "device_name": str(schedule.get("device_name") or "-"),
+                "mode": "queued",
+                "status": "queued",
+                "detail": f"Queued from {str(decision.get('trigger_source') or trigger_source)} trigger",
+            }
             self.schedules_page.status_label.setText(f"Queued schedule #{schedule_id} until the current run finishes.")
             self.schedules_page.load_runs()
             self.log_page.load_logs()
@@ -314,6 +347,19 @@ class MainWindow(QtWidgets.QMainWindow):
             advance_schedule=advance_schedule,
         )
         self._schedule_runners[schedule_id] = runner
+        schedule = self.scheduler_service.get_schedule(schedule_id) or {}
+        self._schedule_run_metadata[schedule_id] = {
+            "task_id": f"schedule-running:{schedule_id}",
+            "schedule_id": schedule_id,
+            "schedule_name": str(schedule.get("name") or f"Schedule #{schedule_id}"),
+            "workflow_name": str(schedule.get("workflow_name") or "-"),
+            "device_name": str(schedule.get("device_name") or "-"),
+            "device_id": int(schedule.get("device_id") or 0),
+            "mode": str(trigger_source or "manual"),
+            "status": "running",
+            "detail": f"Started from {trigger_source}",
+        }
+        self._queued_schedule_metadata.pop(schedule_id, None)
         runner.result_ready.connect(self._on_schedule_runner_result)
         runner.finished.connect(lambda schedule_id=schedule_id: self._cleanup_schedule_runner(schedule_id))
         runner.start()
@@ -323,6 +369,7 @@ class MainWindow(QtWidgets.QMainWindow):
         runner = self._schedule_runners.pop(schedule_id, None)
         if runner is not None:
             runner.deleteLater()
+        self._schedule_run_metadata.pop(schedule_id, None)
         queued = self._queued_schedule_runs.pop(schedule_id, None)
         self._refresh_schedule_runtime_state()
         if queued is not None:
@@ -343,6 +390,115 @@ class MainWindow(QtWidgets.QMainWindow):
             set(self._schedule_runners.keys()),
             set(self._queued_schedule_runs.keys()),
         )
+        self.runtime_page.refresh_runtime()
+
+    def _runtime_workflow_tasks(self) -> list[dict]:
+        tasks = []
+        for task in self.workflow_service.list_active_runtime_tasks():
+            if int(task.get("upload_job_id") or 0) > 0:
+                continue
+            if int(task.get("schedule_id") or 0) > 0:
+                continue
+            tasks.append(
+                {
+                    "task_id": str(task.get("task_id") or ""),
+                    "workflow_name": str(task.get("workflow_name") or "-"),
+                    "device_name": str(task.get("device_name") or "-"),
+                    "scope": str(task.get("scope") or "-"),
+                    "started_at": str(task.get("started_at") or "-"),
+                    "status": str(task.get("status") or "running"),
+                    "detail": str(task.get("detail") or "-"),
+                }
+            )
+        return tasks
+
+    def _runtime_upload_tasks(self) -> list[dict]:
+        tasks = []
+        for job in self.upload_service.list_active_upload_jobs():
+            status = str(job.get("status") or "")
+            detail = "Queued for execution" if status == "queued" else "Upload job is running"
+            tasks.append(
+                {
+                    "task_id": f"upload:{int(job.get('id') or 0)}",
+                    "task_name": f"Upload #{int(job.get('id') or 0)}",
+                    "device_name": str(job.get("device_name") or "-"),
+                    "workflow_name": str(job.get("workflow_name") or "-"),
+                    "started_at": str(job.get("started_at") or job.get("updated_at") or "-"),
+                    "status": status or "draft",
+                    "detail": detail,
+                }
+            )
+        return tasks
+
+    def _runtime_schedule_tasks(self) -> list[dict]:
+        tasks = [dict(item) for item in self._schedule_run_metadata.values()]
+        tasks.extend(dict(item) for item in self._queued_schedule_metadata.values())
+        return tasks
+
+    def _stop_runtime_workflow_task(self, task_id: str) -> bool:
+        result = self.workflow_service.request_stop_for_runtime_task(task_id, reason="Stopped from Runtime page")
+        self.runtime_page.refresh_runtime()
+        return result
+
+    def _stop_runtime_upload_task(self, task_id: str) -> bool:
+        if not task_id.startswith("upload:"):
+            return False
+        upload_job_id = int(task_id.split(":", 1)[1] or 0)
+        if upload_job_id <= 0:
+            return False
+        try:
+            self.upload_service.request_stop_upload_job(upload_job_id, reason="Stopped upload from Runtime page")
+        except Exception:
+            return False
+        self.runtime_page.refresh_runtime()
+        self.uploads_page.load_upload_jobs()
+        return True
+
+    def _cancel_runtime_upload_task(self, task_id: str) -> bool:
+        if not task_id.startswith("upload:"):
+            return False
+        upload_job_id = int(task_id.split(":", 1)[1] or 0)
+        if upload_job_id <= 0:
+            return False
+        try:
+            self.upload_service.cancel_queued_upload_job(upload_job_id)
+        except Exception:
+            return False
+        self.runtime_page.refresh_runtime()
+        self.uploads_page.load_upload_jobs()
+        return True
+
+    def _stop_runtime_schedule_task(self, task_id: str) -> bool:
+        if task_id.startswith("schedule-queued:"):
+            return self._cancel_runtime_schedule_task(task_id)
+        if not task_id.startswith("schedule-running:"):
+            return False
+        schedule_id = int(task_id.split(":", 1)[1] or 0)
+        metadata = self._schedule_run_metadata.get(schedule_id) or {}
+        device_id = int(metadata.get("device_id") or 0)
+        if device_id <= 0:
+            schedule = self.scheduler_service.get_schedule(schedule_id) or {}
+            device_id = int(schedule.get("device_id") or 0)
+        if device_id <= 0:
+            return False
+        self.workflow_service.request_stop_for_devices([device_id], reason="Stopped schedule from Runtime page")
+        if schedule_id in self._schedule_run_metadata:
+            self._schedule_run_metadata[schedule_id]["status"] = "stopping"
+            self._schedule_run_metadata[schedule_id]["detail"] = "Stop requested from Runtime page"
+        self.runtime_page.refresh_runtime()
+        return True
+
+    def _cancel_runtime_schedule_task(self, task_id: str) -> bool:
+        if not task_id.startswith("schedule-queued:"):
+            return False
+        schedule_id = int(task_id.split(":", 1)[1] or 0)
+        removed = self._queued_schedule_runs.pop(schedule_id, None)
+        self._queued_schedule_metadata.pop(schedule_id, None)
+        if removed is None:
+            return False
+        self._refresh_schedule_runtime_state()
+        self.schedules_page.status_label.setText(f"Cancelled queued schedule #{schedule_id}.")
+        return True
 
     def _open_screen_viewer(self) -> None:
         args = [

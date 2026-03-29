@@ -1911,3 +1911,189 @@ class ScheduleRunRepository:
                 (limit,),
             ).fetchall()
         return [row_to_dict(row) for row in rows]
+
+
+class RuntimeRepository:
+    ACTIVE_STATUSES = ("queued", "running", "stopping")
+
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+
+    def upsert_task(
+        self,
+        *,
+        task_id: str,
+        category: str,
+        source: str,
+        status: str,
+        detail: str = "",
+        workflow_id: int | None = None,
+        workflow_name: str = "",
+        device_id: int | None = None,
+        device_name: str = "",
+        upload_job_id: int | None = None,
+        schedule_id: int | None = None,
+        scope: str = "",
+        metadata: dict[str, Any] | None = None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> None:
+        timestamp = self.db.local_timestamp()
+        payload = json.dumps(metadata or {}, ensure_ascii=False)
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_tasks (
+                    task_id, category, source, workflow_id, workflow_name,
+                    device_id, device_name, upload_job_id, schedule_id, scope,
+                    status, detail, metadata_json, created_at, started_at, updated_at, finished_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    category = excluded.category,
+                    source = excluded.source,
+                    workflow_id = excluded.workflow_id,
+                    workflow_name = excluded.workflow_name,
+                    device_id = excluded.device_id,
+                    device_name = excluded.device_name,
+                    upload_job_id = excluded.upload_job_id,
+                    schedule_id = excluded.schedule_id,
+                    scope = excluded.scope,
+                    status = excluded.status,
+                    detail = excluded.detail,
+                    metadata_json = excluded.metadata_json,
+                    started_at = COALESCE(runtime_tasks.started_at, excluded.started_at),
+                    updated_at = excluded.updated_at,
+                    finished_at = excluded.finished_at
+                """,
+                (
+                    str(task_id),
+                    str(category),
+                    str(source),
+                    int(workflow_id) if workflow_id else None,
+                    str(workflow_name or ""),
+                    int(device_id) if device_id else None,
+                    str(device_name or ""),
+                    int(upload_job_id) if upload_job_id else None,
+                    int(schedule_id) if schedule_id else None,
+                    str(scope or ""),
+                    str(status or "queued"),
+                    str(detail or ""),
+                    payload,
+                    timestamp,
+                    started_at,
+                    timestamp,
+                    finished_at,
+                ),
+            )
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM runtime_tasks WHERE task_id = ?",
+                (str(task_id),),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def list_active_tasks(self, category: str | None = None) -> list[dict[str, Any]]:
+        conditions = ["status IN (?, ?, ?)"]
+        values: list[Any] = list(self.ACTIVE_STATUSES)
+        if category:
+            conditions.append("category = ?")
+            values.append(str(category))
+        where_clause = " AND ".join(conditions)
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM runtime_tasks
+                WHERE {where_clause}
+                ORDER BY started_at ASC, created_at ASC, task_id ASC
+                """,
+                values,
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def list_tasks_for_upload_job(self, upload_job_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
+        conditions = ["upload_job_id = ?"]
+        values: list[Any] = [int(upload_job_id)]
+        if active_only:
+            conditions.append("status IN (?, ?, ?)")
+            values.extend(self.ACTIVE_STATUSES)
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM runtime_tasks
+                WHERE {' AND '.join(conditions)}
+                ORDER BY started_at ASC, created_at ASC, task_id ASC
+                """,
+                values,
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def finish_task(self, task_id: str, *, status: str, detail: str = "") -> None:
+        timestamp = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE runtime_tasks
+                SET status = ?, detail = ?, updated_at = ?, finished_at = ?,
+                    stop_requested = 0, cancel_requested = 0, control_reason = ''
+                WHERE task_id = ?
+                """,
+                (str(status), str(detail or ""), timestamp, timestamp, str(task_id)),
+            )
+
+    def delete_task(self, task_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM runtime_tasks WHERE task_id = ?", (str(task_id),))
+
+    def request_task_stop(self, task_id: str, *, reason: str = "") -> bool:
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE runtime_tasks
+                SET stop_requested = 1,
+                    control_reason = ?,
+                    updated_at = ?,
+                    status = CASE
+                        WHEN status = 'running' THEN 'stopping'
+                        ELSE status
+                    END
+                WHERE task_id = ?
+                """,
+                (str(reason or ""), self.db.local_timestamp(), str(task_id)),
+            )
+        return cursor.rowcount > 0
+
+    def request_task_cancel(self, task_id: str, *, reason: str = "") -> bool:
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE runtime_tasks
+                SET cancel_requested = 1,
+                    control_reason = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (str(reason or ""), self.db.local_timestamp(), str(task_id)),
+            )
+        return cursor.rowcount > 0
+
+    def task_control(self, task_id: str) -> dict[str, Any]:
+        row = self.get_task(task_id)
+        if not row:
+            return {
+                "exists": False,
+                "stop_requested": False,
+                "cancel_requested": False,
+                "control_reason": "",
+            }
+        return {
+            "exists": True,
+            "stop_requested": bool(row.get("stop_requested")),
+            "cancel_requested": bool(row.get("cancel_requested")),
+            "control_reason": str(row.get("control_reason") or ""),
+            "status": str(row.get("status") or ""),
+        }

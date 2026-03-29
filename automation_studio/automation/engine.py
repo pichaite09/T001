@@ -39,6 +39,7 @@ class WorkflowExecutor:
         run_for_each_account_handler: Any | None = None,
         prepare_upload_context_handler: Any | None = None,
         shared_context: dict[str, Any] | None = None,
+        external_stop_checker: Any | None = None,
     ) -> None:
         self.device = device
         self.workflow = workflow
@@ -50,6 +51,7 @@ class WorkflowExecutor:
         self.switch_account_handler = switch_account_handler
         self.run_for_each_account_handler = run_for_each_account_handler
         self.prepare_upload_context_handler = prepare_upload_context_handler
+        self.external_stop_checker = external_stop_checker
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_artifact_dir = (
             Path("artifacts")
@@ -87,6 +89,18 @@ class WorkflowExecutor:
         self._stop_requested = True
         self._stop_reason = str(reason or "Workflow stopped by user")
 
+    def _poll_external_stop_request(self) -> None:
+        if self._stop_requested or not callable(self.external_stop_checker):
+            return
+        try:
+            payload = self.external_stop_checker()
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        if bool(payload.get("stop_requested")) or bool(payload.get("cancel_requested")):
+            self.request_stop(str(payload.get("control_reason") or "Workflow stopped externally"))
+
     def run(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
         ordered_steps = sorted(steps, key=lambda item: (int(item["position"]), int(item["id"])))
         position_to_index = {int(step["position"]): index for index, step in enumerate(ordered_steps)}
@@ -105,6 +119,7 @@ class WorkflowExecutor:
         max_transitions = max(1000, len(ordered_steps) * 200)
 
         while 0 <= index < len(ordered_steps):
+            self._poll_external_stop_request()
             transitions += 1
             if transitions > max_transitions:
                 raise RuntimeError(
@@ -115,6 +130,7 @@ class WorkflowExecutor:
             step = ordered_steps[index]
             runtime = {"step": step, "repeat_iteration": 1, "repeat_times": 1}
             self._poll_watchers("before_step", step, runtime)
+            self._poll_external_stop_request()
             if self._stop_requested:
                 break
             if not step["is_enabled"]:
@@ -178,6 +194,7 @@ class WorkflowExecutor:
                 break
 
             self._poll_watchers("after_step", step, runtime)
+            self._poll_external_stop_request()
             if self._stop_requested:
                 break
 
@@ -783,14 +800,26 @@ class WorkflowExecutor:
         remaining = max(float(seconds), 0.0)
         if remaining <= 0:
             return
+        has_external_stop = callable(self.external_stop_checker)
         if not self.watchers or self._watcher_action_depth > 0:
-            time.sleep(remaining)
+            if not has_external_stop:
+                time.sleep(remaining)
+                return
+            interval = 0.2
+            while remaining > 0:
+                chunk = min(interval, remaining)
+                time.sleep(chunk)
+                remaining -= chunk
+                self._poll_external_stop_request()
+                if self._stop_requested:
+                    break
             return
         interval = 0.2
         while remaining > 0:
             chunk = min(interval, remaining)
             time.sleep(chunk)
             remaining -= chunk
+            self._poll_external_stop_request()
             self._poll_watchers("during_wait", step, runtime)
             if self._stop_requested:
                 break

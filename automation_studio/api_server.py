@@ -15,6 +15,7 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    RuntimeRepository,
     TelemetryRepository,
     UploadRepository,
     WatcherRepository,
@@ -338,6 +339,12 @@ class UploadApiApplication:
                         "draft",
                         last_error="Skipped because an earlier batch upload failed",
                     )
+                    if self.upload_service.runtime_repository:
+                        self.upload_service.runtime_repository.finish_task(
+                            f"upload:{int(remaining_id)}",
+                            status="cancelled",
+                            detail="Skipped because an earlier batch upload failed",
+                        )
                     with self._queue_lock:
                         self._queued_upload_job_ids.discard(int(remaining_id))
                 break
@@ -345,6 +352,24 @@ class UploadApiApplication:
     def _run_queued_upload_job(self, upload_job_id: int, *, owner_id: str) -> dict[str, Any]:
         deadline = time.time() + 600.0
         while time.time() < deadline and not self._worker_stop.is_set():
+            upload_job = self.upload_service.get_upload_job(upload_job_id)
+            if not upload_job:
+                return {"success": False, "message": "Upload job not found"}
+            if str(upload_job.get("status") or "") != "queued":
+                return {
+                    "success": False,
+                    "message": f"Upload job #{upload_job_id} is no longer queued",
+                    "cancelled": True,
+                }
+            if self.upload_service.runtime_repository:
+                control = self.upload_service.runtime_repository.task_control(f"upload:{int(upload_job_id)}")
+                if bool(control.get("cancel_requested")):
+                    self.upload_service.cancel_queued_upload_job(upload_job_id)
+                    return {
+                        "success": False,
+                        "message": str(control.get("control_reason") or "Cancelled before execution"),
+                        "cancelled": True,
+                    }
             with self._run_lock:
                 result = self.upload_service.execute_upload_job(upload_job_id, lock_owner_id=owner_id)
             if not result.get("busy"):
@@ -356,6 +381,12 @@ class UploadApiApplication:
             "draft",
             last_error=str(timeout_result["message"]),
         )
+        if self.upload_service.runtime_repository:
+            self.upload_service.runtime_repository.finish_task(
+                f"upload:{int(upload_job_id)}",
+                status="failed",
+                detail=str(timeout_result["message"]),
+            )
         return timeout_result
 
     def _save_upload_job(self, upload_job_id: int | None, payload: dict[str, Any]) -> int:
@@ -637,6 +668,7 @@ def create_api_application(
     workflow_repository = WorkflowRepository(db)
     upload_repository = UploadRepository(db)
     log_repository = LogRepository(db)
+    runtime_repository = RuntimeRepository(db)
     telemetry_repository = TelemetryRepository(db)
     watcher_repository = WatcherRepository(db)
     watcher_telemetry_repository = WatcherTelemetryRepository(db)
@@ -666,6 +698,8 @@ def create_api_application(
         watcher_service,
         watcher_telemetry_service,
         account_service,
+        runtime_repository=runtime_repository,
+        runtime_source="api_server",
     )
     upload_service = UploadService(
         upload_repository,
@@ -673,6 +707,7 @@ def create_api_application(
         workflow_repository,
         account_service,
         workflow_service,
+        runtime_repository=runtime_repository,
     )
     workflow_service.bind_upload_service(upload_service)
     upload_service.bind_workflow_service(workflow_service)

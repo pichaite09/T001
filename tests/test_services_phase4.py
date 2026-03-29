@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    RuntimeRepository,
     TelemetryRepository,
     WatcherRepository,
     WatcherTelemetryRepository,
@@ -79,6 +82,7 @@ class ServicePhase4Tests(unittest.TestCase):
         self.device_repository = DeviceRepository(self.db)
         self.account_repository = AccountRepository(self.db)
         self.log_repository = LogRepository(self.db)
+        self.runtime_repository = RuntimeRepository(self.db)
         self.telemetry_repository = TelemetryRepository(self.db)
         self.watcher_repository = WatcherRepository(self.db)
         self.watcher_telemetry_repository = WatcherTelemetryRepository(self.db)
@@ -108,6 +112,8 @@ class ServicePhase4Tests(unittest.TestCase):
             self.watcher_service,
             self.watcher_telemetry_service,
             self.account_service,
+            runtime_repository=self.runtime_repository,
+            runtime_source="test_service",
         )
 
     def tearDown(self) -> None:
@@ -219,6 +225,47 @@ class ServicePhase4Tests(unittest.TestCase):
         logs = self.log_service.list_logs(workflow_id=workflow_id, device_id=device_id, limit=20)
         start_log = next(log for log in logs if log["status"] == "workflow_started")
         self.assertEqual(json.loads(start_log["metadata"])["execution_scope"], "selected_step")
+
+    def test_execute_workflow_can_be_stopped_via_shared_runtime_task(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        workflow_id = self.service.save_workflow(None, "Shared Stop Workflow", "", True)
+        self.service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Wait",
+            "wait",
+            json.dumps({"seconds": 1.5}),
+            True,
+        )
+
+        holder: dict[str, dict] = {}
+
+        def runner() -> None:
+            holder["result"] = self.service.execute_workflow(workflow_id, device_id)
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+
+        deadline = time.time() + 3.0
+        active_task_id = ""
+        while time.time() < deadline:
+            tasks = self.service.list_active_runtime_tasks()
+            if tasks:
+                active_task_id = str(tasks[0].get("task_id") or "")
+                break
+            time.sleep(0.05)
+
+        self.assertTrue(active_task_id)
+        self.assertTrue(self.service.request_stop_for_runtime_task(active_task_id, reason="Shared runtime stop"))
+        thread.join(timeout=3.0)
+        self.assertFalse(thread.is_alive())
+        self.assertIn("result", holder)
+        self.assertTrue(holder["result"]["success"])
+        self.assertIn("Shared runtime stop", holder["result"]["message"])
+        task = self.runtime_repository.get_task(active_task_id)
+        self.assertIsNotNone(task)
+        self.assertEqual(task["status"], "stopped")
 
     def test_switch_account_step_runs_platform_switch_workflow_and_updates_current_account(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")

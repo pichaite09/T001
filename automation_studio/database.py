@@ -84,6 +84,7 @@ class DatabaseManager:
             (15, self._migration_015_upload_jobs),
             (16, self._migration_016_upload_templates_and_fields),
             (17, self._migration_017_runtime_locks),
+            (18, self._migration_018_runtime_tasks),
         ]
 
     def _table_exists(self, connection: sqlite3.Connection, table_name: str) -> bool:
@@ -629,5 +630,55 @@ class DatabaseManager:
             """
             CREATE INDEX IF NOT EXISTS idx_runtime_locks_group_resource
             ON runtime_locks(lock_group, resource_type, resource_id)
+            """
+        )
+
+    def _migration_018_runtime_tasks(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_tasks (
+                task_id TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'main_ui',
+                workflow_id INTEGER,
+                workflow_name TEXT DEFAULT '',
+                device_id INTEGER,
+                device_name TEXT DEFAULT '',
+                upload_job_id INTEGER,
+                schedule_id INTEGER,
+                scope TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                detail TEXT DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                stop_requested INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                control_reason TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                started_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                finished_at TEXT,
+                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE SET NULL,
+                FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE SET NULL,
+                FOREIGN KEY(upload_job_id) REFERENCES upload_jobs(id) ON DELETE SET NULL,
+                FOREIGN KEY(schedule_id) REFERENCES workflow_schedules(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_runtime_tasks_category_status
+            ON runtime_tasks(category, status, updated_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_runtime_tasks_upload_job
+            ON runtime_tasks(upload_job_id, status)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_runtime_tasks_device
+            ON runtime_tasks(device_id, status)
             """
         )

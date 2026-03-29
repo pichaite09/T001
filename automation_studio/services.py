@@ -26,6 +26,7 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    RuntimeRepository,
     ScheduleGroupRepository,
     ScheduleRepository,
     ScheduleRunRepository,
@@ -864,12 +865,14 @@ class UploadService:
         workflow_repository: WorkflowRepository,
         account_service: AccountService,
         workflow_service: WorkflowService | None = None,
+        runtime_repository: RuntimeRepository | None = None,
     ) -> None:
         self.upload_repository = upload_repository
         self.device_repository = device_repository
         self.workflow_repository = workflow_repository
         self.account_service = account_service
         self.workflow_service = workflow_service
+        self.runtime_repository = runtime_repository
 
     def bind_workflow_service(self, workflow_service: WorkflowService) -> None:
         self.workflow_service = workflow_service
@@ -879,6 +882,40 @@ class UploadService:
 
     def get_upload_job(self, upload_job_id: int) -> dict[str, Any] | None:
         return self.upload_repository.get_upload_job(upload_job_id)
+
+    def list_active_upload_jobs(self) -> list[dict[str, Any]]:
+        return [
+            job
+            for job in self.upload_repository.list_upload_jobs()
+            if str(job.get("status") or "") in {"queued", "running"}
+        ]
+
+    def _sync_upload_runtime_task(
+        self,
+        upload_job: dict[str, Any],
+        *,
+        status: str,
+        detail: str,
+    ) -> None:
+        if not self.runtime_repository or not upload_job:
+            return
+        upload_job_id = int(upload_job.get("id") or 0)
+        if upload_job_id <= 0:
+            return
+        self.runtime_repository.upsert_task(
+            task_id=f"upload:{upload_job_id}",
+            category="upload",
+            source=getattr(self.workflow_service, "runtime_source", "main_ui"),
+            status=status,
+            detail=detail,
+            workflow_id=int(upload_job.get("workflow_id") or 0) or None,
+            workflow_name=str(upload_job.get("workflow_name") or ""),
+            device_id=int(upload_job.get("device_id") or 0) or None,
+            device_name=str(upload_job.get("device_name") or ""),
+            upload_job_id=upload_job_id,
+            metadata={"account_name": str(upload_job.get("account_name") or "")},
+            started_at=str(upload_job.get("started_at") or "") or None,
+        )
 
     def list_upload_templates(self) -> list[dict[str, Any]]:
         return self.upload_repository.list_upload_templates()
@@ -1032,6 +1069,57 @@ class UploadService:
         if self.upload_repository.is_upload_job_busy(upload_job_id):
             raise ValueError("Upload job is already queued or running")
         self.upload_repository.mark_upload_queued(upload_job_id)
+        queued_job = self.upload_repository.get_upload_job(upload_job_id) or upload_job
+        self._sync_upload_runtime_task(
+            queued_job,
+            status="queued",
+            detail="Queued for execution",
+        )
+
+    def cancel_queued_upload_job(self, upload_job_id: int) -> None:
+        upload_job = self.upload_repository.get_upload_job(upload_job_id)
+        if not upload_job:
+            raise ValueError("Upload job not found")
+        if str(upload_job.get("status") or "") != "queued":
+            raise ValueError("Upload job is not queued")
+        self.upload_repository.set_upload_status(upload_job_id, "draft", last_error="")
+        if self.runtime_repository:
+            self.runtime_repository.finish_task(
+                f"upload:{int(upload_job_id)}",
+                status="cancelled",
+                detail="Cancelled before execution",
+            )
+
+    def request_stop_upload_job(self, upload_job_id: int, reason: str = "Stopped upload by user") -> str:
+        upload_job = self.upload_repository.get_upload_job(upload_job_id)
+        if not upload_job:
+            raise ValueError("Upload job not found")
+        status = str(upload_job.get("status") or "")
+        if status == "queued":
+            self.cancel_queued_upload_job(upload_job_id)
+            return "cancelled"
+        if status == "running":
+            if self.runtime_repository:
+                self.runtime_repository.request_task_stop(
+                    f"upload:{int(upload_job_id)}",
+                    reason=reason,
+                )
+                matched_task = False
+                for task in self.runtime_repository.list_tasks_for_upload_job(int(upload_job_id), active_only=True):
+                    if str(task.get("category") or "") == "workflow":
+                        matched_task = True
+                        self.runtime_repository.request_task_stop(str(task.get("task_id") or ""), reason=reason)
+                if not matched_task and self.workflow_service:
+                    device_id = int(upload_job.get("device_id") or 0)
+                    if device_id > 0:
+                        self.workflow_service.request_stop_for_devices([device_id], reason=reason)
+            elif self.workflow_service:
+                device_id = int(upload_job.get("device_id") or 0)
+                if device_id <= 0:
+                    raise ValueError("Upload job has no device")
+                self.workflow_service.request_stop_for_devices([device_id], reason=reason)
+            return "stopping"
+        raise ValueError("Upload job is not queued or running")
 
     def execute_upload_job(self, upload_job_id: int, *, lock_owner_id: str | None = None) -> dict[str, Any]:
         if not self.workflow_service:
@@ -1053,6 +1141,12 @@ class UploadService:
             return {"success": False, "message": acquire_message, "busy": True}
 
         self.upload_repository.mark_upload_started(upload_job_id)
+        running_job = self.upload_repository.get_upload_job(upload_job_id) or upload_job
+        self._sync_upload_runtime_task(
+            running_job,
+            status="running",
+            detail="Upload job is running",
+        )
         upload_context = self._build_upload_context(upload_job)
         try:
             self.workflow_service.log_service.add(
@@ -1108,6 +1202,16 @@ class UploadService:
                 last_error="" if result.get("success") else str(result.get("message") or ""),
                 result_json=json.dumps(result, ensure_ascii=False),
             )
+            if self.runtime_repository:
+                self.runtime_repository.finish_task(
+                    f"upload:{int(upload_job_id)}",
+                    status=final_status,
+                    detail=(
+                        "Upload completed successfully"
+                        if result.get("success")
+                        else str(result.get("message") or "Upload failed")
+                    ),
+                )
             self.workflow_service.log_service.add(
                 int(upload_job["workflow_id"]),
                 int(upload_job["device_id"]),
@@ -1127,6 +1231,14 @@ class UploadService:
                 },
             )
             return result
+        except Exception:
+            if self.runtime_repository:
+                self.runtime_repository.finish_task(
+                    f"upload:{int(upload_job_id)}",
+                    status="failed",
+                    detail="Upload execution failed",
+                )
+            raise
         finally:
             self.upload_repository.release_upload_execution(
                 upload_job_id,
@@ -1361,6 +1473,8 @@ class WorkflowService:
         watcher_telemetry_service: WatcherTelemetryService,
         account_service: AccountService | None = None,
         upload_service: UploadService | None = None,
+        runtime_repository: RuntimeRepository | None = None,
+        runtime_source: str = "main_ui",
     ) -> None:
         self.workflow_repository = workflow_repository
         self.device_repository = device_repository
@@ -1371,24 +1485,114 @@ class WorkflowService:
         self.watcher_telemetry_service = watcher_telemetry_service
         self.account_service = account_service
         self.upload_service = upload_service
+        self.runtime_repository = runtime_repository
+        self.runtime_source = str(runtime_source or "main_ui")
         self._active_executor_lock = threading.Lock()
         self._active_executors_by_device: dict[int, set[WorkflowExecutor]] = {}
+        self._active_runtime_tasks: dict[str, dict[str, Any]] = {}
+        self._active_executors_by_task_id: dict[str, WorkflowExecutor] = {}
 
     def bind_upload_service(self, upload_service: UploadService) -> None:
         self.upload_service = upload_service
 
-    def _register_active_executor(self, device_id: int, executor: WorkflowExecutor) -> None:
+    def _runtime_task_control(self, task_id: str) -> dict[str, Any]:
+        if not self.runtime_repository:
+            return {"exists": False, "stop_requested": False, "cancel_requested": False, "control_reason": ""}
+        return self.runtime_repository.task_control(task_id)
+
+    def _register_active_executor(
+        self,
+        device_id: int,
+        executor: WorkflowExecutor,
+        *,
+        workflow: dict[str, Any],
+        device_record: dict[str, Any],
+        execution_scope: str,
+        context_metadata: dict[str, Any],
+    ) -> None:
+        source = "upload" if context_metadata.get("upload_job_id") else "schedule" if context_metadata.get("schedule_id") else "workflow"
+        task_id = f"workflow-runtime:{executor.run_id}"
+        detail = (
+            f"Upload job #{int(context_metadata.get('upload_job_id') or 0)}"
+            if source == "upload"
+            else f"Schedule #{int(context_metadata.get('schedule_id') or 0)}"
+            if source == "schedule"
+            else "Manual workflow run"
+        )
         with self._active_executor_lock:
             self._active_executors_by_device.setdefault(int(device_id), set()).add(executor)
+            self._active_executors_by_task_id[task_id] = executor
+            self._active_runtime_tasks[task_id] = {
+                "task_id": task_id,
+                "run_id": executor.run_id,
+                "workflow_id": int(workflow["id"]),
+                "workflow_name": str(workflow.get("name") or f"Workflow {workflow['id']}"),
+                "device_id": int(device_id),
+                "device_name": str(device_record.get("name") or device_record.get("serial") or f"Device {device_id}"),
+                "scope": execution_scope,
+                "source": source,
+                "started_at": str(executor.context.get("run", {}).get("started_at") or ""),
+                "status": "running",
+                "detail": detail,
+                "metadata": dict(context_metadata),
+            }
+        if self.runtime_repository:
+            self.runtime_repository.upsert_task(
+                task_id=task_id,
+                category="workflow",
+                source=str(context_metadata.get("runtime_source") or self.runtime_source),
+                status="running",
+                detail=detail,
+                workflow_id=int(workflow["id"]),
+                workflow_name=str(workflow.get("name") or f"Workflow {workflow['id']}"),
+                device_id=int(device_id),
+                device_name=str(device_record.get("name") or device_record.get("serial") or f"Device {device_id}"),
+                upload_job_id=int(context_metadata.get("upload_job_id") or 0) or None,
+                schedule_id=int(context_metadata.get("schedule_id") or 0) or None,
+                scope=execution_scope,
+                metadata=dict(context_metadata),
+                started_at=str(executor.context.get("run", {}).get("started_at") or ""),
+            )
 
     def _unregister_active_executor(self, device_id: int, executor: WorkflowExecutor) -> None:
+        runtime_task_ids: list[str] = []
         with self._active_executor_lock:
             active = self._active_executors_by_device.get(int(device_id))
             if not active:
-                return
+                active = set()
             active.discard(executor)
             if not active:
                 self._active_executors_by_device.pop(int(device_id), None)
+            runtime_task_ids = [task_id for task_id, current in self._active_executors_by_task_id.items() if current is executor]
+            for task_id in runtime_task_ids:
+                self._active_executors_by_task_id.pop(task_id, None)
+                self._active_runtime_tasks.pop(task_id, None)
+        if self.runtime_repository:
+            for task_id in runtime_task_ids:
+                task = self.runtime_repository.get_task(task_id)
+                if task and str(task.get("status") or "") in {"queued", "running", "stopping"}:
+                    self.runtime_repository.finish_task(task_id, status="completed", detail="Workflow run finished")
+
+    def list_active_runtime_tasks(self) -> list[dict[str, Any]]:
+        if self.runtime_repository:
+            return self.runtime_repository.list_active_tasks(category="workflow")
+        with self._active_executor_lock:
+            return [dict(item) for item in self._active_runtime_tasks.values()]
+
+    def request_stop_for_runtime_task(self, task_id: str, reason: str = "Workflow stopped by user") -> bool:
+        persisted = False
+        if self.runtime_repository:
+            persisted = self.runtime_repository.request_task_stop(str(task_id), reason=reason)
+        with self._active_executor_lock:
+            executor = self._active_executors_by_task_id.get(str(task_id))
+            if not executor:
+                return persisted
+            task = self._active_runtime_tasks.get(str(task_id))
+            if task is not None:
+                task["status"] = "stopping"
+                task["detail"] = str(reason or "Stop requested")
+        executor.request_stop(reason)
+        return True
 
     def request_stop_for_devices(self, device_ids: list[int] | set[int], reason: str = "Workflow stopped by user") -> int:
         targets = {int(device_id) for device_id in device_ids if int(device_id or 0) > 0}
@@ -1396,6 +1600,14 @@ class WorkflowService:
         with self._active_executor_lock:
             for device_id in targets:
                 executors.update(self._active_executors_by_device.get(device_id, set()))
+            for task in self._active_runtime_tasks.values():
+                if int(task.get("device_id") or 0) in targets:
+                    task["status"] = "stopping"
+                    task["detail"] = str(reason or "Stop requested")
+        if self.runtime_repository:
+            for task in self.runtime_repository.list_active_tasks(category="workflow"):
+                if int(task.get("device_id") or 0) in targets:
+                    self.runtime_repository.request_task_stop(str(task.get("task_id") or ""), reason=reason)
         for executor in executors:
             executor.request_stop(reason)
         return len(executors)
@@ -1516,6 +1728,7 @@ class WorkflowService:
         workflow: dict[str, Any],
         device_record: dict[str, Any],
         shared_context: dict[str, Any] | None = None,
+        external_stop_checker: Any | None = None,
     ) -> WorkflowExecutor:
         return WorkflowExecutor(
             device=device,
@@ -1529,6 +1742,7 @@ class WorkflowService:
             run_for_each_account_handler=self._execute_run_for_each_account_step,
             prepare_upload_context_handler=self._execute_prepare_upload_context_step,
             shared_context=shared_context,
+            external_stop_checker=external_stop_checker,
         )
 
     def _merge_runtime_context(self, executor: WorkflowExecutor, shared_context: dict[str, Any]) -> None:
@@ -1969,13 +2183,17 @@ class WorkflowService:
         if extra_metadata:
             context_metadata.update(dict(extra_metadata))
 
+        context_metadata.setdefault("runtime_source", self.runtime_source)
         executor = self._executor_for_runtime(
             device=device,
             workflow=workflow,
             device_record=device_record,
             shared_context=shared_context,
+            external_stop_checker=None,
         )
-        self._register_active_executor(int(device_id), executor)
+        runtime_task_id = f"workflow-runtime:{executor.run_id}"
+        if self.runtime_repository:
+            executor.external_stop_checker = lambda task_id=runtime_task_id: self._runtime_task_control(task_id)
 
         execution_scope = "selected_step" if step_ids else "workflow"
         execution_name = (
@@ -1984,6 +2202,14 @@ class WorkflowService:
             else f"{len(steps)} selected steps"
             if step_ids
             else f"workflow '{workflow['name']}'"
+        )
+        self._register_active_executor(
+            int(device_id),
+            executor,
+            workflow=workflow,
+            device_record=device_record,
+            execution_scope=execution_scope,
+            context_metadata=context_metadata,
         )
 
         self.log_service.add(
@@ -2007,6 +2233,12 @@ class WorkflowService:
         try:
             summary = executor.run(steps)
             if summary.get("stopped_by_watcher"):
+                if self.runtime_repository:
+                    self.runtime_repository.finish_task(
+                        runtime_task_id,
+                        status="stopped",
+                        detail=str(summary.get("stop_reason") or "Workflow stopped"),
+                    )
                 self.log_service.add(
                     workflow_id,
                     device_id,
@@ -2038,11 +2270,23 @@ class WorkflowService:
             )
             if continued or skipped:
                 message += f" with {continued} continued failure(s) and {skipped} skipped failure(s)"
+            if self.runtime_repository:
+                self.runtime_repository.finish_task(
+                    runtime_task_id,
+                    status="completed",
+                    detail=message,
+                )
             return {
                 "success": True,
                 "message": message,
             }
         except Exception as exc:
+            if self.runtime_repository:
+                self.runtime_repository.finish_task(
+                    runtime_task_id,
+                    status="failed",
+                    detail=str(exc),
+                )
             self.log_service.add(
                 workflow_id,
                 device_id,

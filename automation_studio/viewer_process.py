@@ -11,6 +11,7 @@ from automation_studio.repositories import (
     AccountRepository,
     DeviceRepository,
     LogRepository,
+    RuntimeRepository,
     TelemetryRepository,
     WatcherRepository,
     WatcherTelemetryRepository,
@@ -55,6 +56,7 @@ def build_workflow_service(db_path: str) -> WorkflowService:
     account_repository = AccountRepository(database)
     workflow_repository = WorkflowRepository(database)
     log_repository = LogRepository(database)
+    runtime_repository = RuntimeRepository(database)
     telemetry_repository = TelemetryRepository(database)
     watcher_repository = WatcherRepository(database)
     watcher_telemetry_repository = WatcherTelemetryRepository(database)
@@ -80,6 +82,8 @@ def build_workflow_service(db_path: str) -> WorkflowService:
         watcher_service,
         watcher_telemetry_service,
         account_service,
+        runtime_repository=runtime_repository,
+        runtime_source="screen_wall",
     )
 
 

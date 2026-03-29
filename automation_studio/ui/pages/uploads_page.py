@@ -22,6 +22,7 @@ class UploadRunThread(QtCore.QThread):
 
 
 class UploadBatchRunThread(QtCore.QThread):
+    progress = QtCore.Signal(dict)
     result_ready = QtCore.Signal(dict)
 
     def __init__(self, upload_service, upload_job_ids: list[int], *, continue_on_error: bool = True) -> None:
@@ -29,13 +30,71 @@ class UploadBatchRunThread(QtCore.QThread):
         self.upload_service = upload_service
         self.upload_job_ids = [int(upload_job_id) for upload_job_id in upload_job_ids]
         self.continue_on_error = continue_on_error
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
 
     def run(self) -> None:
-        result = self.upload_service.execute_upload_jobs(
-            self.upload_job_ids,
-            continue_on_error=self.continue_on_error,
+        ordered_ids = [int(upload_job_id) for upload_job_id in self.upload_job_ids if int(upload_job_id) > 0]
+        results: list[dict] = []
+        success_count = 0
+        failure_count = 0
+        stopped = False
+        total = len(ordered_ids)
+
+        for index, upload_job_id in enumerate(ordered_ids, start=1):
+            if self._stop_requested:
+                stopped = True
+                break
+            self.progress.emit(
+                {
+                    "phase": "started",
+                    "upload_job_id": upload_job_id,
+                    "current": index,
+                    "total": total,
+                }
+            )
+            result = self.upload_service.execute_upload_job(upload_job_id)
+            results.append({"upload_job_id": upload_job_id, "result": result})
+            self.progress.emit(
+                {
+                    "phase": "finished",
+                    "upload_job_id": upload_job_id,
+                    "current": index,
+                    "total": total,
+                    "result": result,
+                }
+            )
+            if result.get("success"):
+                success_count += 1
+            else:
+                failure_count += 1
+                if not self.continue_on_error:
+                    stopped = True
+                    break
+
+        remaining_ids = [upload_job_id for upload_job_id in ordered_ids if upload_job_id not in {int(item["upload_job_id"]) for item in results}]
+        if stopped and remaining_ids:
+            for upload_job_id in remaining_ids:
+                results.append(
+                    {
+                        "upload_job_id": upload_job_id,
+                        "result": {"success": False, "stopped": True, "message": "Stopped before execution"},
+                    }
+                )
+
+        self.result_ready.emit(
+            {
+                "success": failure_count == 0 and not stopped,
+                "total": total,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "stopped": stopped,
+                "continue_on_error": self.continue_on_error,
+                "results": results,
+            }
         )
-        self.result_ready.emit(result)
 
 
 class UploadsPage(QtWidgets.QWidget):
@@ -59,6 +118,8 @@ class UploadsPage(QtWidgets.QWidget):
         self.current_device_id: int | None = None
         self._run_thread: UploadRunThread | None = None
         self._batch_run_thread: UploadBatchRunThread | None = None
+        self._active_run_metadata: dict | None = None
+        self._active_batch_metadata: dict | None = None
         self._jobs_by_id: dict[int, dict] = {}
         self._templates_by_id: dict[int, dict] = {}
         self._settings = QtCore.QSettings("AutomationStudio", "UploadsPage")
@@ -642,7 +703,17 @@ class UploadsPage(QtWidgets.QWidget):
             self.status_label.setText("A batch upload run is already in progress.")
             return
         self.status_label.setText(f"Running {label} ({len(upload_job_ids)})...")
+        self._active_batch_metadata = {
+            "task_id": "upload-batch-run",
+            "upload_job_ids": [int(upload_job_id) for upload_job_id in upload_job_ids],
+            "current_upload_job_id": None,
+            "current_device_id": None,
+            "started_at": QtCore.QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+            "status": "running",
+            "detail": f"Running {label} ({len(upload_job_ids)})",
+        }
         self._batch_run_thread = UploadBatchRunThread(self.upload_service, upload_job_ids, continue_on_error=True)
+        self._batch_run_thread.progress.connect(self._on_batch_run_progress)
         self._batch_run_thread.result_ready.connect(self._on_batch_run_result)
         self._batch_run_thread.finished.connect(self._on_batch_run_finished)
         self._batch_run_thread.start()
@@ -665,12 +736,37 @@ class UploadsPage(QtWidgets.QWidget):
             self.status_label.setText(f"Auto runner queued upload job #{upload_job_id}.")
         else:
             self.status_label.setText(f"Queued upload job #{upload_job_id} for execution.")
+        upload_job = self.upload_service.get_upload_job(int(upload_job_id)) or {}
+        self._active_run_metadata = {
+            "task_id": "upload-single-run",
+            "upload_job_id": int(upload_job_id),
+            "device_id": int(upload_job.get("device_id") or 0),
+            "device_name": str(upload_job.get("device_name") or ""),
+            "workflow_name": str(upload_job.get("workflow_name") or ""),
+            "account_name": str(upload_job.get("account_name") or ""),
+            "started_at": QtCore.QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+            "status": "running",
+            "detail": f"Queued upload job #{upload_job_id} for execution.",
+        }
         self._run_thread = UploadRunThread(self.upload_service, int(upload_job_id))
         self._run_thread.result_ready.connect(self._on_run_result)
         self._run_thread.finished.connect(self._on_run_finished)
         self._run_thread.start()
         self._sync_actions()
         return True
+
+    def _on_batch_run_progress(self, payload: dict) -> None:
+        if not self._active_batch_metadata:
+            return
+        upload_job_id = int(payload.get("upload_job_id") or 0)
+        phase = str(payload.get("phase") or "")
+        upload_job = self._jobs_by_id.get(upload_job_id) or self.upload_service.get_upload_job(upload_job_id) or {}
+        self._active_batch_metadata["current_upload_job_id"] = upload_job_id
+        self._active_batch_metadata["current_device_id"] = int(upload_job.get("device_id") or 0)
+        self._active_batch_metadata["detail"] = (
+            f"{phase.title()} upload job #{upload_job_id} "
+            f"({int(payload.get('current') or 0)}/{int(payload.get('total') or 0)})"
+        )
 
     def _on_run_result(self, upload_job_id: int, result: dict) -> None:
         status = "completed" if result.get("success") else "failed"
@@ -681,6 +777,7 @@ class UploadsPage(QtWidgets.QWidget):
 
     def _on_run_finished(self) -> None:
         self._run_thread = None
+        self._active_run_metadata = None
         self._sync_actions()
         if self.auto_run_checkbox.isChecked():
             QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
@@ -694,9 +791,42 @@ class UploadsPage(QtWidgets.QWidget):
 
     def _on_batch_run_finished(self) -> None:
         self._batch_run_thread = None
+        self._active_batch_metadata = None
         self._sync_actions()
         if self.auto_run_checkbox.isChecked():
             QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
+
+    def runtime_snapshot(self) -> list[dict]:
+        tasks: list[dict] = []
+        if self._run_thread and self._run_thread.isRunning() and self._active_run_metadata:
+            tasks.append(dict(self._active_run_metadata))
+        if self._batch_run_thread and self._batch_run_thread.isRunning() and self._active_batch_metadata:
+            tasks.append(dict(self._active_batch_metadata))
+        return tasks
+
+    def request_stop_runtime_task(self, task_id: str) -> bool:
+        if task_id == "upload-single-run":
+            if not self._run_thread or not self._run_thread.isRunning() or not self._active_run_metadata:
+                return False
+            device_id = int(self._active_run_metadata.get("device_id") or 0)
+            if device_id > 0:
+                self.workflow_service.request_stop_for_devices([device_id], reason="Stopped upload from Runtime page")
+            self._active_run_metadata["status"] = "stopping"
+            self._active_run_metadata["detail"] = "Stop requested from Runtime page"
+            self.status_label.setText("Stop requested for active upload job.")
+            return True
+        if task_id == "upload-batch-run":
+            if not self._batch_run_thread or not self._batch_run_thread.isRunning() or not self._active_batch_metadata:
+                return False
+            self._batch_run_thread.request_stop()
+            current_device_id = int(self._active_batch_metadata.get("current_device_id") or 0)
+            if current_device_id > 0:
+                self.workflow_service.request_stop_for_devices([current_device_id], reason="Stopped upload batch from Runtime page")
+            self._active_batch_metadata["status"] = "stopping"
+            self._active_batch_metadata["detail"] = "Stop requested from Runtime page"
+            self.status_label.setText("Stop requested for active upload batch.")
+            return True
+        return False
 
     def import_upload_jobs(self) -> None:
         path_text, _ = QtWidgets.QFileDialog.getOpenFileName(

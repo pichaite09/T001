@@ -216,6 +216,7 @@ class WorkflowPage(QtWidgets.QWidget):
         self.current_step_id: int | None = None
         self.current_steps: list[dict] = []
         self.runner: WorkflowRunner | None = None
+        self._active_run_metadata: dict | None = None
         self._build_ui()
         self.refresh_devices()
         self.load_workflows()
@@ -902,6 +903,20 @@ class WorkflowPage(QtWidgets.QWidget):
         self.run_button.setDisabled(True)
         self.run_step_button.setDisabled(True)
         self.run_status_label.setText(status_text)
+        workflow_name = self.workflow_name_input.text().strip() or "Workflow"
+        device_name = self.device_combo.currentText().strip() or f"Device {device_id}"
+        self._active_run_metadata = {
+            "task_id": "workflow-page-run",
+            "workflow_id": int(self.current_workflow_id or 0),
+            "workflow_name": workflow_name,
+            "device_id": int(device_id),
+            "device_name": device_name,
+            "scope": "step" if step_ids else "workflow",
+            "step_ids": list(step_ids or []),
+            "started_at": QtCore.QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+            "status": "running",
+            "detail": status_text,
+        }
         self.runner = WorkflowRunner(
             self.workflow_service,
             self.current_workflow_id,
@@ -928,6 +943,7 @@ class WorkflowPage(QtWidgets.QWidget):
 
     def _on_runner_finished(self) -> None:
         self.runner = None
+        self._active_run_metadata = None
         self._sync_step_actions()
 
     def _on_workflow_finished(self, result: dict) -> None:
@@ -937,6 +953,23 @@ class WorkflowPage(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "Workflow completed", result["message"])
         else:
             QtWidgets.QMessageBox.warning(self, "Workflow failed", result["message"])
+
+    def runtime_snapshot(self) -> list[dict]:
+        if not self.runner or not self.runner.isRunning() or not self._active_run_metadata:
+            return []
+        return [dict(self._active_run_metadata)]
+
+    def request_stop_active_run(self) -> bool:
+        if not self.runner or not self.runner.isRunning() or not self._active_run_metadata:
+            return False
+        device_id = int(self._active_run_metadata.get("device_id") or 0)
+        if device_id <= 0:
+            return False
+        self.workflow_service.request_stop_for_devices([device_id], reason="Stopped from Runtime page")
+        self.run_status_label.setText("Stop requested for active workflow run.")
+        self._active_run_metadata["status"] = "stopping"
+        self._active_run_metadata["detail"] = "Stop requested from Runtime page"
+        return True
 
     def _format_step_summary(self, parameters_text: str) -> str:
         try:
