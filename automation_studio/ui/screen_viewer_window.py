@@ -1001,6 +1001,21 @@ class DeviceScreenTile(QtWidgets.QFrame):
             self._device = None
             return False, str(exc)
 
+    def set_quarter_brightness(self) -> tuple[bool, str]:
+        try:
+            device = self._ensure_connected()
+            device.shell("settings put system screen_brightness_mode 0")
+            # Use a dimmer perceptual mapping so 25% looks closer to quarter brightness.
+            device.shell("settings put system screen_brightness 16")
+            try:
+                device.shell("cmd display brightness 0.06")
+            except Exception:
+                pass
+            return True, "Brightness set to 25%"
+        except Exception as exc:
+            self._device = None
+            return False, str(exc)
+
     def _press_device_key(
         self,
         *,
@@ -1547,6 +1562,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self.save_selected_button = QtWidgets.QPushButton("Save Selected")
         self.realtime_selected_button = QtWidgets.QPushButton("Realtime Selected")
         self.min_brightness_button = QtWidgets.QPushButton("Min Brightness")
+        self.quarter_brightness_button = QtWidgets.QPushButton("Brightness 25%")
         self.max_brightness_button = QtWidgets.QPushButton("Max Brightness")
         self.home_selected_button = QtWidgets.QPushButton("Home")
         self.back_selected_button = QtWidgets.QPushButton("Back")
@@ -1559,6 +1575,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             self.save_selected_button,
             self.realtime_selected_button,
             self.min_brightness_button,
+            self.quarter_brightness_button,
             self.max_brightness_button,
             self.home_selected_button,
             self.back_selected_button,
@@ -1610,6 +1627,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self.save_selected_button.clicked.connect(self.save_selected_frames)
         self.realtime_selected_button.clicked.connect(self.open_realtime_selected_viewers)
         self.min_brightness_button.clicked.connect(self.set_min_brightness_selected_tiles)
+        self.quarter_brightness_button.clicked.connect(self.set_quarter_brightness_selected_tiles)
         self.max_brightness_button.clicked.connect(self.set_max_brightness_selected_tiles)
         self.home_selected_button.clicked.connect(self.press_home_selected_tiles)
         self.back_selected_button.clicked.connect(self.press_back_selected_tiles)
@@ -1706,6 +1724,7 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             self.save_selected_button,
             self.realtime_selected_button,
             self.min_brightness_button,
+            self.quarter_brightness_button,
             self.max_brightness_button,
             self.home_selected_button,
             self.back_selected_button,
@@ -2003,6 +2022,26 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             )
             return
         self.status_label.setText(f"Status: brightness set to maximum on {success_count} devices")
+
+    def set_quarter_brightness_selected_tiles(self) -> None:
+        selected_tiles = self._selected_tiles()
+        if not selected_tiles:
+            self.status_label.setText("Status: no selected devices")
+            return
+        success_count = 0
+        failures: list[str] = []
+        for tile in selected_tiles:
+            success, message = tile.set_quarter_brightness()
+            if success:
+                success_count += 1
+            else:
+                failures.append(f"{tile.device_name}: {message}")
+        if failures:
+            self.status_label.setText(
+                f"Status: brightness set on {success_count}/{len(selected_tiles)} devices; {failures[0]}"
+            )
+            return
+        self.status_label.setText(f"Status: brightness set to 25% on {success_count} devices")
 
     def press_home_selected_tiles(self) -> None:
         selected_tiles = self._selected_tiles()

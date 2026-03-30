@@ -596,6 +596,43 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertIn("maximum", window.status_label.text().lower())
         window.close()
 
+    def test_set_quarter_brightness_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[str] = []
+        window._tiles[0].set_quarter_brightness = lambda: captured.append("SERIAL1") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[1].set_quarter_brightness = lambda: captured.append("SERIAL2") or (True, "ok")  # type: ignore[method-assign]
+        window._tiles[0].set_selected(True)
+        window.set_quarter_brightness_selected_tiles()
+        self.assertEqual(captured, ["SERIAL1"])
+        self.assertIn("25%", window.status_label.text().lower())
+        window.close()
+
+    def test_tile_quarter_brightness_uses_dimmer_mapping(self) -> None:
+        class _FakeDevice:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def shell(self, command: str):
+                self.commands.append(command)
+                return ("ok", 0)
+
+        tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
+        fake_device = _FakeDevice()
+        tile._ensure_connected = lambda: fake_device  # type: ignore[method-assign]
+        success, message = tile.set_quarter_brightness()
+        self.assertTrue(success)
+        self.assertIn("25%", message)
+        self.assertIn("settings put system screen_brightness 16", fake_device.commands)
+        self.assertIn("cmd display brightness 0.06", fake_device.commands)
+        tile.deleteLater()
+
     def test_press_home_selected_only_targets_selected_tiles(self) -> None:
         window = ScreenViewerWindow(
             devices=[
