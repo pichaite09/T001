@@ -316,6 +316,7 @@ class UploadApiApplication:
             try:
                 task = self._task_queue.get(timeout=0.25)
             except queue.Empty:
+                self._enqueue_recovered_queued_jobs()
                 continue
             if task is None:
                 break
@@ -323,6 +324,25 @@ class UploadApiApplication:
                 self._process_task(task)
             finally:
                 self._task_queue.task_done()
+
+    def _enqueue_recovered_queued_jobs(self) -> None:
+        recovered_ids: list[int] = []
+        with self._queue_lock:
+            for upload_job in self.upload_service.list_queued_upload_jobs():
+                upload_job_id = int(upload_job.get("id") or 0)
+                if upload_job_id <= 0 or upload_job_id in self._queued_upload_job_ids:
+                    continue
+                self._queued_upload_job_ids.add(upload_job_id)
+                recovered_ids.append(upload_job_id)
+        for upload_job_id in recovered_ids:
+            self._task_queue.put(
+                {
+                    "kind": "single",
+                    "upload_job_ids": [int(upload_job_id)],
+                    "continue_on_error": True,
+                    "task_id": f"recovered:{upload_job_id}:{int(time.time() * 1000)}",
+                }
+            )
 
     def _process_task(self, task: dict[str, Any]) -> None:
         upload_job_ids = [int(upload_job_id) for upload_job_id in task.get("upload_job_ids") or [] if int(upload_job_id) > 0]
@@ -350,44 +370,13 @@ class UploadApiApplication:
                 break
 
     def _run_queued_upload_job(self, upload_job_id: int, *, owner_id: str) -> dict[str, Any]:
-        deadline = time.time() + 600.0
-        while time.time() < deadline and not self._worker_stop.is_set():
-            upload_job = self.upload_service.get_upload_job(upload_job_id)
-            if not upload_job:
-                return {"success": False, "message": "Upload job not found"}
-            if str(upload_job.get("status") or "") != "queued":
-                return {
-                    "success": False,
-                    "message": f"Upload job #{upload_job_id} is no longer queued",
-                    "cancelled": True,
-                }
-            if self.upload_service.runtime_repository:
-                control = self.upload_service.runtime_repository.task_control(f"upload:{int(upload_job_id)}")
-                if bool(control.get("cancel_requested")):
-                    self.upload_service.cancel_queued_upload_job(upload_job_id)
-                    return {
-                        "success": False,
-                        "message": str(control.get("control_reason") or "Cancelled before execution"),
-                        "cancelled": True,
-                    }
-            with self._run_lock:
-                result = self.upload_service.execute_upload_job(upload_job_id, lock_owner_id=owner_id)
-            if not result.get("busy"):
-                return result
-            time.sleep(1.0)
-        timeout_result = {"success": False, "message": "Timed out waiting for upload execution lock", "busy": True}
-        self.upload_service.upload_repository.set_upload_status(
-            upload_job_id,
-            "draft",
-            last_error=str(timeout_result["message"]),
-        )
-        if self.upload_service.runtime_repository:
-            self.upload_service.runtime_repository.finish_task(
-                f"upload:{int(upload_job_id)}",
-                status="failed",
-                detail=str(timeout_result["message"]),
+        with self._run_lock:
+            return self.upload_service.run_queued_upload_job(
+                upload_job_id,
+                owner_id=owner_id,
+                wait_timeout_seconds=600.0,
+                poll_interval_seconds=1.0,
             )
-        return timeout_result
 
     def _save_upload_job(self, upload_job_id: int | None, payload: dict[str, Any]) -> int:
         tags_value = payload.get("tags", payload.get("tags_text", ""))

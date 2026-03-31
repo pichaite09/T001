@@ -121,6 +121,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_service,
             self.account_service,
             schedule_group_repository=self.schedule_group_repository,
+            runtime_repository=self.runtime_repository,
         )
 
     def _build_ui(self) -> None:
@@ -271,7 +272,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scheduler_timer.setInterval(15000)
         self.scheduler_timer.timeout.connect(self._poll_due_schedules)
         self.scheduler_timer.start()
+        self.runtime_heartbeat_timer = QtCore.QTimer(self)
+        self.runtime_heartbeat_timer.setInterval(5000)
+        self.runtime_heartbeat_timer.timeout.connect(self._heartbeat_runtime_tasks)
+        self.runtime_heartbeat_timer.start()
         QtCore.QTimer.singleShot(1000, self._poll_due_schedules)
+
+    def _heartbeat_runtime_tasks(self) -> None:
+        if not self.runtime_repository:
+            return
+        for metadata in list(self._queued_schedule_metadata.values()):
+            self.runtime_repository.touch_task(
+                str(metadata.get("task_id") or ""),
+                status=str(metadata.get("status") or "queued"),
+                detail=str(metadata.get("detail") or "Queued schedule"),
+            )
+        for metadata in list(self._schedule_run_metadata.values()):
+            self.runtime_repository.touch_task(
+                str(metadata.get("task_id") or ""),
+                status=str(metadata.get("status") or "running"),
+                detail=str(metadata.get("detail") or "Running schedule"),
+            )
 
     def _run_schedule_now(self, schedule_id: int) -> None:
         self._dispatch_schedule_run(int(schedule_id), trigger_source="manual", advance_schedule=False, startup_recovery=False)
@@ -332,6 +353,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 "status": "queued",
                 "detail": f"Queued from {str(decision.get('trigger_source') or trigger_source)} trigger",
             }
+            if self.runtime_repository:
+                self.runtime_repository.upsert_task(
+                    task_id=f"schedule-queued:{schedule_id}",
+                    category="schedule",
+                    source="main_ui",
+                    status="queued",
+                    detail=f"Queued from {str(decision.get('trigger_source') or trigger_source)} trigger",
+                    workflow_id=int(schedule.get("workflow_id") or 0) or None,
+                    workflow_name=str(schedule.get("workflow_name") or "-"),
+                    device_id=int(schedule.get("device_id") or 0) or None,
+                    device_name=str(schedule.get("device_name") or "-"),
+                    schedule_id=schedule_id,
+                    scope="schedule",
+                    metadata={"trigger_source": str(decision.get("trigger_source") or trigger_source)},
+                )
             self.schedules_page.status_label.setText(f"Queued schedule #{schedule_id} until the current run finishes.")
             self.schedules_page.load_runs()
             self.log_page.load_logs()
@@ -345,6 +381,7 @@ class MainWindow(QtWidgets.QMainWindow):
             schedule_id,
             trigger_source=trigger_source,
             advance_schedule=advance_schedule,
+            runtime_task_id=f"schedule-running:{schedule_id}",
         )
         self._schedule_runners[schedule_id] = runner
         schedule = self.scheduler_service.get_schedule(schedule_id) or {}
@@ -359,6 +396,26 @@ class MainWindow(QtWidgets.QMainWindow):
             "status": "running",
             "detail": f"Started from {trigger_source}",
         }
+        if self.runtime_repository:
+            self.runtime_repository.finish_task(
+                f"schedule-queued:{schedule_id}",
+                status="completed",
+                detail="Schedule queue entry consumed",
+            )
+            self.runtime_repository.upsert_task(
+                task_id=f"schedule-running:{schedule_id}",
+                category="schedule",
+                source="main_ui",
+                status="running",
+                detail=f"Started from {trigger_source}",
+                workflow_id=int(schedule.get("workflow_id") or 0) or None,
+                workflow_name=str(schedule.get("workflow_name") or "-"),
+                device_id=int(schedule.get("device_id") or 0) or None,
+                device_name=str(schedule.get("device_name") or "-"),
+                schedule_id=schedule_id,
+                scope="schedule",
+                metadata={"trigger_source": str(trigger_source or "manual")},
+            )
         self._queued_schedule_metadata.pop(schedule_id, None)
         runner.result_ready.connect(self._on_schedule_runner_result)
         runner.finished.connect(lambda schedule_id=schedule_id: self._cleanup_schedule_runner(schedule_id))
@@ -366,9 +423,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_schedule_runtime_state()
 
     def _cleanup_schedule_runner(self, schedule_id: int) -> None:
+        metadata = self._schedule_run_metadata.get(schedule_id) or {}
         runner = self._schedule_runners.pop(schedule_id, None)
         if runner is not None:
             runner.deleteLater()
+        if self.runtime_repository and metadata:
+            task = self.runtime_repository.get_task(str(metadata.get("task_id") or ""))
+            if task and str(task.get("status") or "") in {"queued", "running", "stopping"}:
+                self.runtime_repository.finish_task(
+                    str(metadata.get("task_id") or ""),
+                    status="failed",
+                    detail="Schedule runner ended unexpectedly",
+                )
         self._schedule_run_metadata.pop(schedule_id, None)
         queued = self._queued_schedule_runs.pop(schedule_id, None)
         self._refresh_schedule_runtime_state()
@@ -382,6 +448,15 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def _on_schedule_runner_result(self, schedule_id: int, result: dict) -> None:
+        metadata = self._schedule_run_metadata.get(schedule_id) or {}
+        if self.runtime_repository and metadata:
+            run_status = str(result.get("run_status") or "")
+            final_status = run_status or ("success" if result.get("success") else "stopped" if result.get("stopped") else "failed")
+            self.runtime_repository.finish_task(
+                str(metadata.get("task_id") or ""),
+                status=final_status,
+                detail=str(result.get("message") or final_status.title()),
+            )
         self.schedules_page.notify_schedule_result(schedule_id, result)
         self._refresh_schedule_runtime_state()
 
@@ -431,6 +506,23 @@ class MainWindow(QtWidgets.QMainWindow):
         return tasks
 
     def _runtime_schedule_tasks(self) -> list[dict]:
+        if self.runtime_repository:
+            tasks = []
+            for task in self.runtime_repository.list_active_tasks(category="schedule"):
+                schedule_id = int(task.get("schedule_id") or 0)
+                schedule = self.scheduler_service.get_schedule(schedule_id) or {}
+                tasks.append(
+                    {
+                        "task_id": str(task.get("task_id") or ""),
+                        "schedule_name": str(schedule.get("name") or f"Schedule #{schedule_id}" if schedule_id > 0 else "Schedule"),
+                        "device_name": str(task.get("device_name") or "-"),
+                        "workflow_name": str(task.get("workflow_name") or "-"),
+                        "mode": str((self._schedule_run_metadata.get(schedule_id) or self._queued_schedule_metadata.get(schedule_id) or {}).get("mode") or task.get("source") or "-"),
+                        "status": str(task.get("status") or "queued"),
+                        "detail": str(task.get("detail") or "-"),
+                    }
+                )
+            return tasks
         tasks = [dict(item) for item in self._schedule_run_metadata.values()]
         tasks.extend(dict(item) for item in self._queued_schedule_metadata.values())
         return tasks
@@ -474,14 +566,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not task_id.startswith("schedule-running:"):
             return False
         schedule_id = int(task_id.split(":", 1)[1] or 0)
-        metadata = self._schedule_run_metadata.get(schedule_id) or {}
-        device_id = int(metadata.get("device_id") or 0)
-        if device_id <= 0:
-            schedule = self.scheduler_service.get_schedule(schedule_id) or {}
-            device_id = int(schedule.get("device_id") or 0)
-        if device_id <= 0:
-            return False
-        self.workflow_service.request_stop_for_devices([device_id], reason="Stopped schedule from Runtime page")
+        if self.runtime_repository:
+            self.runtime_repository.request_task_stop(task_id, reason="Stopped schedule from Runtime page")
+            for task in self.runtime_repository.list_tasks_for_schedule(schedule_id, active_only=True):
+                if str(task.get("category") or "") == "workflow":
+                    self.runtime_repository.request_task_stop(
+                        str(task.get("task_id") or ""),
+                        reason="Stopped schedule from Runtime page",
+                    )
         if schedule_id in self._schedule_run_metadata:
             self._schedule_run_metadata[schedule_id]["status"] = "stopping"
             self._schedule_run_metadata[schedule_id]["detail"] = "Stop requested from Runtime page"
@@ -494,6 +586,13 @@ class MainWindow(QtWidgets.QMainWindow):
         schedule_id = int(task_id.split(":", 1)[1] or 0)
         removed = self._queued_schedule_runs.pop(schedule_id, None)
         self._queued_schedule_metadata.pop(schedule_id, None)
+        if self.runtime_repository:
+            self.runtime_repository.request_task_cancel(task_id, reason="Cancelled queued schedule from Runtime page")
+            self.runtime_repository.finish_task(
+                task_id,
+                status="cancelled",
+                detail="Cancelled before execution",
+            )
         if removed is None:
             return False
         self._refresh_schedule_runtime_state()

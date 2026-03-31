@@ -17,7 +17,7 @@ class UploadRunThread(QtCore.QThread):
         self.upload_job_id = upload_job_id
 
     def run(self) -> None:
-        result = self.upload_service.execute_upload_job(self.upload_job_id)
+        result = self.upload_service.run_queued_upload_job(self.upload_job_id)
         self.result_ready.emit(self.upload_job_id, result)
 
 
@@ -122,15 +122,27 @@ class UploadsPage(QtWidgets.QWidget):
         self._active_batch_metadata: dict | None = None
         self._jobs_by_id: dict[int, dict] = {}
         self._templates_by_id: dict[int, dict] = {}
+        self._closing = False
         self._settings = QtCore.QSettings("AutomationStudio", "UploadsPage")
         self._auto_run_timer = QtCore.QTimer(self)
         self._auto_run_timer.timeout.connect(self._check_auto_run_draft_jobs)
+        self._queued_recovery_timer = QtCore.QTimer(self)
+        self._queued_recovery_timer.setInterval(1000)
+        self._queued_recovery_timer.timeout.connect(self._check_queued_upload_jobs)
         self._build_ui()
         self._restore_auto_run_settings()
         self.refresh_devices()
         self.refresh_workflows()
         self.refresh_templates()
         self.load_upload_jobs()
+        self._queued_recovery_timer.start()
+        QtCore.QTimer.singleShot(0, self._check_queued_upload_jobs)
+
+    def closeEvent(self, event) -> None:
+        self._closing = True
+        self._auto_run_timer.stop()
+        self._queued_recovery_timer.stop()
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -736,6 +748,9 @@ class UploadsPage(QtWidgets.QWidget):
             self.status_label.setText(f"Auto runner queued upload job #{upload_job_id}.")
         else:
             self.status_label.setText(f"Queued upload job #{upload_job_id} for execution.")
+        return self._launch_queued_run(int(upload_job_id))
+
+    def _launch_queued_run(self, upload_job_id: int) -> bool:
         upload_job = self.upload_service.get_upload_job(int(upload_job_id)) or {}
         self._active_run_metadata = {
             "task_id": "upload-single-run",
@@ -769,7 +784,16 @@ class UploadsPage(QtWidgets.QWidget):
         )
 
     def _on_run_result(self, upload_job_id: int, result: dict) -> None:
-        status = "completed" if result.get("success") else "failed"
+        if result.get("success"):
+            status = "completed"
+        elif result.get("stopped"):
+            status = "stopped"
+        elif result.get("cancelled"):
+            status = "cancelled"
+        elif result.get("busy"):
+            status = "timed out"
+        else:
+            status = "failed"
         self.load_upload_jobs()
         self._select_upload_row(upload_job_id)
         self.status_label.setText(f"Upload job #{upload_job_id} {status}: {result.get('message') or '-'}")
@@ -779,6 +803,7 @@ class UploadsPage(QtWidgets.QWidget):
         self._run_thread = None
         self._active_run_metadata = None
         self._sync_actions()
+        QtCore.QTimer.singleShot(0, self._check_queued_upload_jobs)
         if self.auto_run_checkbox.isChecked():
             QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
 
@@ -793,6 +818,7 @@ class UploadsPage(QtWidgets.QWidget):
         self._batch_run_thread = None
         self._active_batch_metadata = None
         self._sync_actions()
+        QtCore.QTimer.singleShot(0, self._check_queued_upload_jobs)
         if self.auto_run_checkbox.isChecked():
             QtCore.QTimer.singleShot(0, self._check_auto_run_draft_jobs)
 
@@ -916,6 +942,14 @@ class UploadsPage(QtWidgets.QWidget):
             ids.append(int(cell.text()))
         return ids
 
+    def _next_queued_upload_job_id(self) -> int | None:
+        queued_ids = [
+            int(job["id"])
+            for job in self._jobs_by_id.values()
+            if str(job.get("status") or "") == "queued"
+        ]
+        return min(queued_ids) if queued_ids else None
+
     def _restore_auto_run_settings(self) -> None:
         enabled = str(self._settings.value("auto_run_enabled", "false")).strip().lower() in {"1", "true", "yes", "on"}
         interval_seconds = int(self._settings.value("auto_run_interval_seconds", 10) or 10)
@@ -957,6 +991,12 @@ class UploadsPage(QtWidgets.QWidget):
         if busy:
             self.auto_run_state_label.setText(f"Auto runner: waiting for current run to finish ({interval_seconds} sec)")
             return
+        next_queued_job_id = self._next_queued_upload_job_id()
+        if next_queued_job_id is not None:
+            self.auto_run_state_label.setText(
+                f"Auto runner: recovering queued job #{next_queued_job_id} before drafts"
+            )
+            return
         next_job_id = self._next_draft_upload_job_id()
         if next_job_id is None:
             self.auto_run_state_label.setText(f"Auto runner: on, checking every {interval_seconds} sec")
@@ -973,7 +1013,26 @@ class UploadsPage(QtWidgets.QWidget):
         ]
         return min(draft_ids) if draft_ids else None
 
+    def _check_queued_upload_jobs(self) -> None:
+        if self._closing:
+            return
+        if self._run_thread and self._run_thread.isRunning():
+            return
+        if self._batch_run_thread and self._batch_run_thread.isRunning():
+            return
+        queued_jobs = self.upload_service.list_queued_upload_jobs()
+        if not queued_jobs:
+            return
+        self.load_upload_jobs()
+        next_job_id = self._next_queued_upload_job_id()
+        if next_job_id is None:
+            return
+        self.status_label.setText(f"Recovering queued upload job #{next_job_id}...")
+        self._launch_queued_run(next_job_id)
+
     def _check_auto_run_draft_jobs(self) -> None:
+        if self._closing:
+            return
         if not self.auto_run_checkbox.isChecked():
             return
         if self._run_thread and self._run_thread.isRunning():
@@ -982,7 +1041,15 @@ class UploadsPage(QtWidgets.QWidget):
         if self._batch_run_thread and self._batch_run_thread.isRunning():
             self._sync_actions()
             return
+        if self._next_queued_upload_job_id() is not None:
+            self._sync_actions()
+            QtCore.QTimer.singleShot(0, self._check_queued_upload_jobs)
+            return
         self.load_upload_jobs()
+        if self._next_queued_upload_job_id() is not None:
+            self._sync_actions()
+            QtCore.QTimer.singleShot(0, self._check_queued_upload_jobs)
+            return
         next_job_id = self._next_draft_upload_job_id()
         if next_job_id is None:
             self._sync_actions()

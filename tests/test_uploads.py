@@ -841,6 +841,48 @@ class UploadTests(unittest.TestCase):
         self.assertIn("completed", page.status_label.text().lower())
         page.close()
 
+    def test_uploads_page_recovers_queued_job_and_executes_it(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        workflow_id = self.workflow_service.save_workflow(None, "Queued Upload Workflow", "", True)
+        self.workflow_service.save_step(
+            None,
+            workflow_id,
+            1,
+            "Echo Queued Upload",
+            "shell",
+            json.dumps({"command": "echo ${upload.get('title')}"}, ensure_ascii=False),
+            True,
+        )
+        upload_job_id = self.upload_service.save_upload_job(
+            None,
+            device_id=device_id,
+            device_platform_id=None,
+            account_id=None,
+            workflow_id=workflow_id,
+            code_product="SKU-QUEUED",
+            link_product="https://example.com/queued",
+            title="Queued Upload",
+            description="",
+            tags_text="",
+            video_url="https://cdn.example.com/queued.mp4",
+        )
+        self.upload_service.mark_upload_job_queued(upload_job_id)
+
+        page = UploadsPage(
+            self.upload_service,
+            self.workflow_service,
+            self.device_service,
+            self.account_service,
+        )
+        page._check_queued_upload_jobs()
+        self._wait_for(lambda: page._run_thread is None)
+
+        upload_job = self.upload_service.get_upload_job(upload_job_id)
+        self.assertEqual(upload_job["status"], "success")
+        self.assertEqual(self.fake_device.actions, [("shell", "echo Queued Upload")])
+        self.assertIn("completed", page.status_label.text().lower())
+        page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

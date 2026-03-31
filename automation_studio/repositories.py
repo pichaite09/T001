@@ -1166,6 +1166,28 @@ class UploadRepository:
             ).fetchone()
         return row_to_dict(row) if row else None
 
+    def list_queued_upload_jobs(self) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    upload_jobs.*,
+                    devices.name AS device_name,
+                    workflows.name AS workflow_name,
+                    device_platforms.platform_key,
+                    device_platforms.platform_name,
+                    accounts.display_name AS account_name
+                FROM upload_jobs
+                INNER JOIN devices ON devices.id = upload_jobs.device_id
+                INNER JOIN workflows ON workflows.id = upload_jobs.workflow_id
+                LEFT JOIN device_platforms ON device_platforms.id = upload_jobs.device_platform_id
+                LEFT JOIN accounts ON accounts.id = upload_jobs.account_id
+                WHERE upload_jobs.status = 'queued'
+                ORDER BY upload_jobs.updated_at ASC, upload_jobs.id ASC
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
     def upsert_upload_job(
         self,
         upload_job_id: int | None,
@@ -1366,6 +1388,16 @@ class UploadRepository:
                 expires_at,
                 json.dumps({"device_id": int(device_id)}, ensure_ascii=False),
             ),
+            (
+                f"device:{int(device_id)}:execution",
+                "device_execution",
+                "device",
+                int(device_id),
+                owner_id,
+                now,
+                expires_at,
+                json.dumps({"device_id": int(device_id), "scope": "upload"}, ensure_ascii=False),
+            ),
         ]
         try:
             with self.db.connection() as connection:
@@ -1391,12 +1423,112 @@ class UploadRepository:
                 """
                 DELETE FROM runtime_locks
                 WHERE owner_id = ?
-                  AND lock_key IN (?, ?)
+                  AND lock_key IN (?, ?, ?)
                 """,
                 (
                     owner_id,
                     f"upload_job:{int(upload_job_id)}",
                     f"device:{int(device_id)}:upload_execution",
+                    f"device:{int(device_id)}:execution",
+                ),
+            )
+
+    def refresh_upload_execution(
+        self,
+        upload_job_id: int,
+        device_id: int,
+        *,
+        owner_id: str,
+        lease_seconds: int = 3600,
+    ) -> None:
+        expires_at = (datetime.now().astimezone() + timedelta(seconds=max(int(lease_seconds), 60))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE runtime_locks
+                SET expires_at = ?
+                WHERE owner_id = ?
+                  AND lock_key IN (?, ?, ?)
+                """,
+                (
+                    expires_at,
+                    str(owner_id),
+                    f"upload_job:{int(upload_job_id)}",
+                    f"device:{int(device_id)}:upload_execution",
+                    f"device:{int(device_id)}:execution",
+                ),
+            )
+
+    def try_acquire_device_execution(
+        self,
+        device_id: int,
+        *,
+        owner_id: str,
+        lease_seconds: int = 3600,
+        scope: str = "workflow",
+    ) -> tuple[bool, str]:
+        now = self.db.local_timestamp()
+        expires_at = (datetime.now().astimezone() + timedelta(seconds=max(int(lease_seconds), 60))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        try:
+            with self.db.connection() as connection:
+                connection.execute("DELETE FROM runtime_locks WHERE expires_at <= ?", (now,))
+                connection.execute(
+                    """
+                    INSERT INTO runtime_locks (
+                        lock_key, lock_group, resource_type, resource_id,
+                        owner_id, acquired_at, expires_at, metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"device:{int(device_id)}:execution",
+                        "device_execution",
+                        "device",
+                        int(device_id),
+                        str(owner_id),
+                        now,
+                        expires_at,
+                        json.dumps({"device_id": int(device_id), "scope": str(scope or "workflow")}, ensure_ascii=False),
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            return False, "Device is already executing another task"
+        return True, ""
+
+    def refresh_device_execution(self, device_id: int, *, owner_id: str, lease_seconds: int = 3600) -> None:
+        expires_at = (datetime.now().astimezone() + timedelta(seconds=max(int(lease_seconds), 60))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE runtime_locks
+                SET expires_at = ?
+                WHERE owner_id = ?
+                  AND lock_key = ?
+                """,
+                (
+                    expires_at,
+                    str(owner_id),
+                    f"device:{int(device_id)}:execution",
+                ),
+            )
+
+    def release_device_execution(self, device_id: int, *, owner_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                DELETE FROM runtime_locks
+                WHERE owner_id = ?
+                  AND lock_key = ?
+                """,
+                (
+                    str(owner_id),
+                    f"device:{int(device_id)}:execution",
                 ),
             )
 
@@ -1915,9 +2047,35 @@ class ScheduleRunRepository:
 
 class RuntimeRepository:
     ACTIVE_STATUSES = ("queued", "running", "stopping")
+    STALE_RUNNING_SECONDS = 900
 
     def __init__(self, db: DatabaseManager) -> None:
         self.db = db
+
+    def _cleanup_stale_tasks(self) -> None:
+        stale_before = (
+            datetime.now().astimezone() - timedelta(seconds=self.STALE_RUNNING_SECONDS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        now = self.db.local_timestamp()
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE runtime_tasks
+                SET status = 'failed',
+                    detail = CASE
+                        WHEN COALESCE(detail, '') = '' THEN 'Runtime task became stale'
+                        WHEN detail LIKE '%(stale)' THEN detail
+                        ELSE detail || ' (stale)'
+                    END,
+                    updated_at = ?,
+                    finished_at = COALESCE(finished_at, ?),
+                    stop_requested = 0,
+                    cancel_requested = 0
+                WHERE status IN ('running', 'stopping')
+                  AND updated_at <= ?
+                """,
+                (now, now, stale_before),
+            )
 
     def upsert_task(
         self,
@@ -1988,6 +2146,7 @@ class RuntimeRepository:
             )
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
+        self._cleanup_stale_tasks()
         with self.db.connection() as connection:
             row = connection.execute(
                 "SELECT * FROM runtime_tasks WHERE task_id = ?",
@@ -1996,6 +2155,7 @@ class RuntimeRepository:
         return row_to_dict(row) if row else None
 
     def list_active_tasks(self, category: str | None = None) -> list[dict[str, Any]]:
+        self._cleanup_stale_tasks()
         conditions = ["status IN (?, ?, ?)"]
         values: list[Any] = list(self.ACTIVE_STATUSES)
         if category:
@@ -2015,8 +2175,28 @@ class RuntimeRepository:
         return [row_to_dict(row) for row in rows]
 
     def list_tasks_for_upload_job(self, upload_job_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
+        self._cleanup_stale_tasks()
         conditions = ["upload_job_id = ?"]
         values: list[Any] = [int(upload_job_id)]
+        if active_only:
+            conditions.append("status IN (?, ?, ?)")
+            values.extend(self.ACTIVE_STATUSES)
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM runtime_tasks
+                WHERE {' AND '.join(conditions)}
+                ORDER BY started_at ASC, created_at ASC, task_id ASC
+                """,
+                values,
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def list_tasks_for_schedule(self, schedule_id: int, *, active_only: bool = True) -> list[dict[str, Any]]:
+        self._cleanup_stale_tasks()
+        conditions = ["schedule_id = ?"]
+        values: list[Any] = [int(schedule_id)]
         if active_only:
             conditions.append("status IN (?, ?, ?)")
             values.extend(self.ACTIVE_STATUSES)
@@ -2080,6 +2260,98 @@ class RuntimeRepository:
                 (str(reason or ""), self.db.local_timestamp(), str(task_id)),
             )
         return cursor.rowcount > 0
+
+    def touch_task(self, task_id: str, *, status: str | None = None, detail: str | None = None) -> bool:
+        assignments = ["updated_at = ?"]
+        values: list[Any] = [self.db.local_timestamp()]
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(str(status))
+        if detail is not None:
+            assignments.append("detail = ?")
+            values.append(str(detail))
+        values.append(str(task_id))
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE runtime_tasks
+                SET {', '.join(assignments)}
+                WHERE task_id = ?
+                """,
+                values,
+            )
+        return cursor.rowcount > 0
+
+    def try_acquire_device_execution(
+        self,
+        device_id: int,
+        *,
+        owner_id: str,
+        lease_seconds: int = 3600,
+        scope: str = "workflow",
+    ) -> tuple[bool, str]:
+        now = self.db.local_timestamp()
+        expires_at = (datetime.now().astimezone() + timedelta(seconds=max(int(lease_seconds), 60))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        try:
+            with self.db.connection() as connection:
+                connection.execute("DELETE FROM runtime_locks WHERE expires_at <= ?", (now,))
+                connection.execute(
+                    """
+                    INSERT INTO runtime_locks (
+                        lock_key, lock_group, resource_type, resource_id,
+                        owner_id, acquired_at, expires_at, metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"device:{int(device_id)}:execution",
+                        "device_execution",
+                        "device",
+                        int(device_id),
+                        str(owner_id),
+                        now,
+                        expires_at,
+                        json.dumps({"device_id": int(device_id), "scope": str(scope or "workflow")}, ensure_ascii=False),
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            return False, "Device is already executing another task"
+        return True, ""
+
+    def refresh_device_execution(self, device_id: int, *, owner_id: str, lease_seconds: int = 3600) -> None:
+        expires_at = (datetime.now().astimezone() + timedelta(seconds=max(int(lease_seconds), 60))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                UPDATE runtime_locks
+                SET expires_at = ?
+                WHERE owner_id = ?
+                  AND lock_key = ?
+                """,
+                (
+                    expires_at,
+                    str(owner_id),
+                    f"device:{int(device_id)}:execution",
+                ),
+            )
+
+    def release_device_execution(self, device_id: int, *, owner_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """
+                DELETE FROM runtime_locks
+                WHERE owner_id = ?
+                  AND lock_key = ?
+                """,
+                (
+                    str(owner_id),
+                    f"device:{int(device_id)}:execution",
+                ),
+            )
 
     def task_control(self, task_id: str) -> dict[str, Any]:
         row = self.get_task(task_id)

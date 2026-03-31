@@ -15,18 +15,21 @@ class ScheduleRunThread(QtCore.QThread):
         *,
         trigger_source: str,
         advance_schedule: bool,
+        runtime_task_id: str | None = None,
     ) -> None:
         super().__init__()
         self.scheduler_service = scheduler_service
         self.schedule_id = schedule_id
         self.trigger_source = trigger_source
         self.advance_schedule = advance_schedule
+        self.runtime_task_id = runtime_task_id
 
     def run(self) -> None:
         result = self.scheduler_service.execute_schedule(
             self.schedule_id,
             trigger_source=self.trigger_source,
             advance_schedule=self.advance_schedule,
+            runtime_task_id=self.runtime_task_id,
         )
         self.result_ready.emit(self.schedule_id, result)
 
