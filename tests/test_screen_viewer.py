@@ -614,6 +614,52 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertIn("25%", window.status_label.text().lower())
         window.close()
 
+    def test_install_app_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[tuple[str, str]] = []
+        original_get_open_file_name = QtWidgets.QFileDialog.getOpenFileName
+        QtWidgets.QFileDialog.getOpenFileName = staticmethod(lambda *args, **kwargs: ("C:/temp/app.apk", "Android Package (*.apk)"))  # type: ignore[assignment]
+        try:
+            window._tiles[0].install_apk = lambda apk_path: captured.append(("SERIAL1", str(apk_path))) or (True, "ok")  # type: ignore[method-assign]
+            window._tiles[1].install_apk = lambda apk_path: captured.append(("SERIAL2", str(apk_path))) or (True, "ok")  # type: ignore[method-assign]
+            window._tiles[0].set_selected(True)
+            window.install_app_selected_tiles()
+        finally:
+            QtWidgets.QFileDialog.getOpenFileName = original_get_open_file_name  # type: ignore[assignment]
+        self.assertEqual(captured, [("SERIAL1", "C:/temp/app.apk")])
+        self.assertIn("installed app", window.status_label.text().lower())
+        window.close()
+
+    def test_uninstall_app_selected_only_targets_selected_tiles(self) -> None:
+        window = ScreenViewerWindow(
+            devices=[
+                {"id": 1, "name": "Phone A", "serial": "SERIAL1"},
+                {"id": 2, "name": "Phone B", "serial": "SERIAL2"},
+            ],
+            refresh_interval_ms=500,
+            autostart=False,
+        )
+        captured: list[tuple[str, str]] = []
+        original_get_text = QtWidgets.QInputDialog.getText
+        QtWidgets.QInputDialog.getText = staticmethod(lambda *args, **kwargs: ("com.example.demo", True))  # type: ignore[assignment]
+        try:
+            window._tiles[0].uninstall_app = lambda package_name: captured.append(("SERIAL1", str(package_name))) or (True, "ok")  # type: ignore[method-assign]
+            window._tiles[1].uninstall_app = lambda package_name: captured.append(("SERIAL2", str(package_name))) or (True, "ok")  # type: ignore[method-assign]
+            window._tiles[1].set_selected(True)
+            window.uninstall_app_selected_tiles()
+        finally:
+            QtWidgets.QInputDialog.getText = original_get_text  # type: ignore[assignment]
+        self.assertEqual(captured, [("SERIAL2", "com.example.demo")])
+        self.assertIn("uninstalled app", window.status_label.text().lower())
+        window.close()
+
     def test_tile_quarter_brightness_uses_dimmer_mapping(self) -> None:
         class _FakeDevice:
             def __init__(self) -> None:
@@ -631,6 +677,59 @@ class ScreenViewerTests(unittest.TestCase):
         self.assertIn("25%", message)
         self.assertIn("settings put system screen_brightness 16", fake_device.commands)
         self.assertIn("cmd display brightness 0.06", fake_device.commands)
+        tile.deleteLater()
+
+    def test_tile_install_apk_uses_adb_install_command(self) -> None:
+        class _FakeCompletedProcess:
+            def __init__(self) -> None:
+                self.returncode = 0
+                self.stdout = "Success"
+                self.stderr = ""
+
+        tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
+        original_run = screen_viewer_module.subprocess.run
+        captured: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            apk_path = Path(temp_dir) / "demo.apk"
+            apk_path.write_bytes(b"apk")
+
+            def _fake_run(command, **kwargs):
+                captured.append(list(command))
+                return _FakeCompletedProcess()
+
+            screen_viewer_module.subprocess.run = _fake_run  # type: ignore[assignment]
+            try:
+                success, message = tile.install_apk(apk_path)
+            finally:
+                screen_viewer_module.subprocess.run = original_run  # type: ignore[assignment]
+        self.assertTrue(success)
+        self.assertIn("Installed demo.apk", message)
+        self.assertEqual(captured, [["adb", "-s", "SERIAL1", "install", "-r", str(apk_path)]])
+        tile.deleteLater()
+
+    def test_tile_uninstall_app_uses_adb_uninstall_command(self) -> None:
+        class _FakeCompletedProcess:
+            def __init__(self) -> None:
+                self.returncode = 0
+                self.stdout = "Success"
+                self.stderr = ""
+
+        tile = DeviceScreenTile({"id": 1, "name": "Phone A", "serial": "SERIAL1"})
+        original_run = screen_viewer_module.subprocess.run
+        captured: list[list[str]] = []
+
+        def _fake_run(command, **kwargs):
+            captured.append(list(command))
+            return _FakeCompletedProcess()
+
+        screen_viewer_module.subprocess.run = _fake_run  # type: ignore[assignment]
+        try:
+            success, message = tile.uninstall_app("com.example.demo")
+        finally:
+            screen_viewer_module.subprocess.run = original_run  # type: ignore[assignment]
+        self.assertTrue(success)
+        self.assertIn("Uninstalled com.example.demo", message)
+        self.assertEqual(captured, [["adb", "-s", "SERIAL1", "uninstall", "com.example.demo"]])
         tile.deleteLater()
 
     def test_press_home_selected_only_targets_selected_tiles(self) -> None:

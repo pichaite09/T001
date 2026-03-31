@@ -436,6 +436,38 @@ STEP_DEFINITIONS = [
         fields=(StepField("package", "Package Name", required=True, placeholder="com.example.app"),),
     ),
     StepDefinition(
+        key="launch_activity",
+        label="Launch Activity",
+        description="Start a specific Android activity via am start.",
+        template={
+            "package": "com.example.app",
+            "activity": "com.example.app.MainActivity",
+            "action": "android.intent.action.MAIN",
+            "category": "android.intent.category.LAUNCHER",
+        },
+        fields=(
+            StepField("package", "Package Name", required=True, placeholder="com.example.app"),
+            StepField("activity", "Activity Name", required=True, placeholder="com.example.app.MainActivity"),
+            StepField("action", "Intent Action", placeholder="android.intent.action.MAIN"),
+            StepField("category", "Intent Category", placeholder="android.intent.category.LAUNCHER"),
+        ),
+    ),
+    StepDefinition(
+        key="launch_app_monkey",
+        label="Launch App (Monkey)",
+        description="Start an Android app using adb monkey for clone or launcher-based cases.",
+        template={
+            "package": "com.example.app",
+            "category": "android.intent.category.LAUNCHER",
+            "event_count": 1,
+        },
+        fields=(
+            StepField("package", "Package Name", required=True, placeholder="com.example.app"),
+            StepField("category", "Intent Category", placeholder="android.intent.category.LAUNCHER"),
+            StepField("event_count", "Event Count", field_type="int", default=1, min_value=1),
+        ),
+    ),
+    StepDefinition(
         key="tap",
         label="Tap Coordinates",
         description="Tap an absolute screen coordinate.",
@@ -1156,8 +1188,19 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         if not _selector_present(parameters):
             errors.append(f"{step_label} requires at least one selector field")
 
-    if step_type in {"launch_app", "stop_app"} and not str(parameters.get("package", "")).strip():
+    if step_type in {"launch_app", "stop_app", "launch_app_monkey"} and not str(parameters.get("package", "")).strip():
         errors.append("Package Name is required")
+
+    if step_type == "launch_activity":
+        if not str(parameters.get("package", "")).strip():
+            errors.append("Package Name is required")
+        if not str(parameters.get("activity", "")).strip():
+            errors.append("Activity Name is required")
+
+    if step_type == "launch_app_monkey":
+        event_count = _safe_int(parameters.get("event_count", 1), "Event Count", errors)
+        if event_count is not None and event_count < 1:
+            errors.append("Event Count must be greater than or equal to 1")
 
     if step_type == "tap" and not _has_coordinate_pair(parameters):
         errors.append("Tap requires both x and y")

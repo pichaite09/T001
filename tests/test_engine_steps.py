@@ -166,6 +166,42 @@ class EngineStepSuiteTests(unittest.TestCase):
         self.assertEqual(result["package"], "com.example.app")
         self.assertIn(("app_stop", "com.example.app"), self.device.actions)
 
+    def test_launch_activity_step(self) -> None:
+        result = self._execute(
+            "launch_activity",
+            {
+                "package": "com.example.clone",
+                "activity": "com.example.clone.MainActivity",
+                "action": "android.intent.action.MAIN",
+                "category": "android.intent.category.LAUNCHER",
+            },
+        )
+        self.assertEqual(result["package"], "com.example.clone")
+        self.assertEqual(result["component"], "com.example.clone/com.example.clone.MainActivity")
+        self.assertIn(
+            (
+                "shell",
+                "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.example.clone/com.example.clone.MainActivity",
+            ),
+            self.device.actions,
+        )
+
+    def test_launch_app_monkey_step(self) -> None:
+        result = self._execute(
+            "launch_app_monkey",
+            {
+                "package": "com.example.clone",
+                "category": "android.intent.category.LAUNCHER",
+                "event_count": 1,
+            },
+        )
+        self.assertEqual(result["package"], "com.example.clone")
+        self.assertEqual(result["event_count"], 1)
+        self.assertIn(
+            ("shell", "monkey -p com.example.clone -c android.intent.category.LAUNCHER 1"),
+            self.device.actions,
+        )
+
     def test_tap_step(self) -> None:
         result = self._execute("tap", {"x": 10, "y": 20})
         self.assertEqual(result, {"x": 10, "y": 20})

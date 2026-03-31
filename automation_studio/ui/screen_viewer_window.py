@@ -121,10 +121,6 @@ class ViewerImageLabel(QtWidgets.QLabel):
         super().paintEvent(event)
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        if self._hover_point is not None:
-            painter.setPen(QtGui.QPen(QtGui.QColor("#7dd3fc"), 1, QtCore.Qt.PenStyle.DashLine))
-            painter.drawLine(0, self._hover_point.y(), self.width(), self._hover_point.y())
-            painter.drawLine(self._hover_point.x(), 0, self._hover_point.x(), self.height())
         if self._last_tap_point is not None:
             painter.setPen(QtGui.QPen(QtGui.QColor("#f87171"), 2))
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
@@ -720,6 +716,7 @@ class DeviceScreenTile(QtWidgets.QFrame):
     TILE_SIDE_MARGIN = 12
     OFFLINE_RETRY_COOLDOWN_SECONDS = 5.0
     ADB_STATE_TIMEOUT_SECONDS = 1.0
+    ADB_COMMAND_TIMEOUT_SECONDS = 120.0
 
     save_requested = QtCore.Signal(object)
     realtime_requested = QtCore.Signal(object)
@@ -1014,6 +1011,48 @@ class DeviceScreenTile(QtWidgets.QFrame):
             return True, "Brightness set to 25%"
         except Exception as exc:
             self._device = None
+            return False, str(exc)
+
+    def install_apk(self, apk_path: str | Path) -> tuple[bool, str]:
+        try:
+            if not self.serial:
+                raise RuntimeError("Device serial is missing")
+            apk_file = Path(apk_path).expanduser()
+            if not apk_file.exists():
+                raise FileNotFoundError(f"APK not found: {apk_file}")
+            result = subprocess.run(
+                ["adb", "-s", self.serial, "install", "-r", str(apk_file)],
+                capture_output=True,
+                text=True,
+                timeout=self.ADB_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            output = str(result.stdout or result.stderr or "").strip()
+            if result.returncode != 0:
+                raise RuntimeError(output or f"adb install failed ({result.returncode})")
+            return True, f"Installed {apk_file.name}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def uninstall_app(self, package_name: str) -> tuple[bool, str]:
+        try:
+            if not self.serial:
+                raise RuntimeError("Device serial is missing")
+            normalized_package = str(package_name or "").strip()
+            if not normalized_package:
+                raise RuntimeError("Package name is required")
+            result = subprocess.run(
+                ["adb", "-s", self.serial, "uninstall", normalized_package],
+                capture_output=True,
+                text=True,
+                timeout=self.ADB_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            output = str(result.stdout or result.stderr or "").strip()
+            if result.returncode != 0:
+                raise RuntimeError(output or f"adb uninstall failed ({result.returncode})")
+            return True, f"Uninstalled {normalized_package}"
+        except Exception as exc:
             return False, str(exc)
 
     def _press_device_key(
@@ -1561,6 +1600,8 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self.reconnect_selected_button = QtWidgets.QPushButton("Reconnect Selected")
         self.save_selected_button = QtWidgets.QPushButton("Save Selected")
         self.realtime_selected_button = QtWidgets.QPushButton("Realtime Selected")
+        self.install_app_button = QtWidgets.QPushButton("Install App")
+        self.uninstall_app_button = QtWidgets.QPushButton("Uninstall App")
         self.min_brightness_button = QtWidgets.QPushButton("Min Brightness")
         self.quarter_brightness_button = QtWidgets.QPushButton("Brightness 25%")
         self.max_brightness_button = QtWidgets.QPushButton("Max Brightness")
@@ -1574,6 +1615,8 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             self.reconnect_selected_button,
             self.save_selected_button,
             self.realtime_selected_button,
+            self.install_app_button,
+            self.uninstall_app_button,
             self.min_brightness_button,
             self.quarter_brightness_button,
             self.max_brightness_button,
@@ -1626,6 +1669,8 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
         self.reconnect_selected_button.clicked.connect(self.force_reconnect_selected_tiles)
         self.save_selected_button.clicked.connect(self.save_selected_frames)
         self.realtime_selected_button.clicked.connect(self.open_realtime_selected_viewers)
+        self.install_app_button.clicked.connect(self.install_app_selected_tiles)
+        self.uninstall_app_button.clicked.connect(self.uninstall_app_selected_tiles)
         self.min_brightness_button.clicked.connect(self.set_min_brightness_selected_tiles)
         self.quarter_brightness_button.clicked.connect(self.set_quarter_brightness_selected_tiles)
         self.max_brightness_button.clicked.connect(self.set_max_brightness_selected_tiles)
@@ -1723,6 +1768,8 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             self.reconnect_selected_button,
             self.save_selected_button,
             self.realtime_selected_button,
+            self.install_app_button,
+            self.uninstall_app_button,
             self.min_brightness_button,
             self.quarter_brightness_button,
             self.max_brightness_button,
@@ -1982,6 +2029,65 @@ class ScreenViewerWindow(QtWidgets.QMainWindow):
             tile.force_reconnect()
         self.status_label.setText(f"Status: reconnecting {len(selected_tiles)} selected devices")
         self._refresh_tiles(selected_tiles, label="refreshing selected")
+
+    def install_app_selected_tiles(self) -> None:
+        selected_tiles = self._selected_tiles()
+        if not selected_tiles:
+            self.status_label.setText("Status: no selected devices")
+            return
+        apk_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select APK to install",
+            str(Path.home()),
+            "Android Package (*.apk);;All files (*)",
+        )
+        if not apk_path:
+            self.status_label.setText("Status: install cancelled")
+            return
+        success_count = 0
+        failures: list[str] = []
+        for tile in selected_tiles:
+            success, message = tile.install_apk(apk_path)
+            if success:
+                success_count += 1
+            else:
+                failures.append(f"{tile.device_name}: {message}")
+        if failures:
+            self.status_label.setText(
+                f"Status: installed app on {success_count}/{len(selected_tiles)} devices; {failures[0]}"
+            )
+            return
+        self.status_label.setText(f"Status: installed app on {success_count} devices")
+
+    def uninstall_app_selected_tiles(self) -> None:
+        selected_tiles = self._selected_tiles()
+        if not selected_tiles:
+            self.status_label.setText("Status: no selected devices")
+            return
+        package_name, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            "Uninstall App",
+            "Package name:",
+            QtWidgets.QLineEdit.EchoMode.Normal,
+        )
+        normalized_package = str(package_name or "").strip()
+        if not accepted or not normalized_package:
+            self.status_label.setText("Status: uninstall cancelled")
+            return
+        success_count = 0
+        failures: list[str] = []
+        for tile in selected_tiles:
+            success, message = tile.uninstall_app(normalized_package)
+            if success:
+                success_count += 1
+            else:
+                failures.append(f"{tile.device_name}: {message}")
+        if failures:
+            self.status_label.setText(
+                f"Status: uninstalled app on {success_count}/{len(selected_tiles)} devices; {failures[0]}"
+            )
+            return
+        self.status_label.setText(f"Status: uninstalled app on {success_count} devices")
 
     def set_min_brightness_selected_tiles(self) -> None:
         selected_tiles = self._selected_tiles()

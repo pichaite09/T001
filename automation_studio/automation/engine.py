@@ -226,6 +226,8 @@ class WorkflowExecutor:
         handlers = {
             "launch_app": self._launch_app,
             "stop_app": self._stop_app,
+            "launch_activity": self._launch_activity,
+            "launch_app_monkey": self._launch_app_monkey,
             "tap": self._tap,
             "click": self._click,
             "long_click": self._long_click,
@@ -1071,6 +1073,46 @@ class WorkflowExecutor:
     def _stop_app(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         self.device.app_stop(parameters["package"])
         return {"package": parameters["package"]}
+
+    def _launch_activity(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        package = str(parameters["package"])
+        activity = str(parameters["activity"])
+        component = activity if "/" in activity else f"{package}/{activity}"
+        command_parts = ["am", "start"]
+        action = str(parameters.get("action", "") or "").strip()
+        category = str(parameters.get("category", "") or "").strip()
+        if action:
+            command_parts.extend(["-a", action])
+        if category:
+            command_parts.extend(["-c", category])
+        command_parts.extend(["-n", component])
+        command = " ".join(command_parts)
+        response = self.device.shell(command)
+        return {
+            "package": package,
+            "activity": activity,
+            "component": component,
+            "command": command,
+            "response": response[0] if isinstance(response, tuple) else response,
+        }
+
+    def _launch_app_monkey(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        package = str(parameters["package"])
+        category = str(parameters.get("category", "android.intent.category.LAUNCHER") or "").strip()
+        event_count = max(1, int(parameters.get("event_count", 1)))
+        command_parts = ["monkey", "-p", package]
+        if category:
+            command_parts.extend(["-c", category])
+        command_parts.append(str(event_count))
+        command = " ".join(command_parts)
+        response = self.device.shell(command)
+        return {
+            "package": package,
+            "category": category,
+            "event_count": event_count,
+            "command": command,
+            "response": response[0] if isinstance(response, tuple) else response,
+        }
 
     def _tap(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         x = int(parameters["x"])
