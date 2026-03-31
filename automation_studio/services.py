@@ -1840,6 +1840,7 @@ class WorkflowService:
             watcher_telemetry_service=self.watcher_telemetry_service,
             switch_account_handler=self._execute_switch_account_step,
             run_for_each_account_handler=self._execute_run_for_each_account_step,
+            run_workflow_handler=self._execute_run_workflow_step,
             prepare_upload_context_handler=self._execute_prepare_upload_context_step,
             shared_context=shared_context,
             external_stop_checker=external_stop_checker,
@@ -2051,6 +2052,28 @@ class WorkflowService:
             "failure_count": failure_count,
             "continue_on_account_error": continue_on_account_error,
             "account_results": account_results,
+        }
+
+    def _execute_run_workflow_step(
+        self,
+        executor: WorkflowExecutor,
+        parameters: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        target_workflow_id = int(parameters.get("target_workflow_id", 0) or 0)
+        if target_workflow_id <= 0:
+            raise RuntimeError("run_workflow requires target_workflow_id")
+
+        target_workflow, target_summary = self._run_nested_workflow(
+            executor=executor,
+            workflow_id=target_workflow_id,
+            shared_context=executor.context,
+            label="Target workflow",
+        )
+        return {
+            "target_workflow_id": int(target_workflow["id"]),
+            "target_workflow_name": str(target_workflow.get("name") or ""),
+            "target_summary": target_summary,
         }
 
     def _execute_prepare_upload_context_step(

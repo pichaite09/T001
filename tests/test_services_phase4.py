@@ -712,6 +712,44 @@ class ServicePhase4Tests(unittest.TestCase):
         self.assertEqual(start_metadata["execution_scope"], "selected_step")
         self.assertEqual(start_metadata["selected_step_ids"], [step_id])
 
+    def test_run_workflow_step_executes_nested_workflow_and_continues(self) -> None:
+        device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
+        child_workflow_id = self.service.save_workflow(None, "Child Workflow", "", True)
+        self.service.save_step(
+            None,
+            child_workflow_id,
+            1,
+            "Child Tap",
+            "tap",
+            json.dumps({"x": 11, "y": 22}),
+            True,
+        )
+        main_workflow_id = self.service.save_workflow(None, "Main Workflow", "", True)
+        self.service.save_step(
+            None,
+            main_workflow_id,
+            1,
+            "Run Child Workflow",
+            "run_workflow",
+            json.dumps({"target_workflow_id": child_workflow_id}),
+            True,
+        )
+        self.service.save_step(
+            None,
+            main_workflow_id,
+            2,
+            "Main Tap",
+            "tap",
+            json.dumps({"x": 33, "y": 44}),
+            True,
+        )
+
+        result = self.service.execute_workflow(main_workflow_id, device_id)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(self.fake_device.actions[0], ("click", 11, 22))
+        self.assertEqual(self.fake_device.actions[1], ("click", 33, 44))
+
 
 if __name__ == "__main__":
     unittest.main()

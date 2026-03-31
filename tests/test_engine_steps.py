@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -482,6 +483,108 @@ class EngineStepSuiteTests(unittest.TestCase):
         )
         self.assertEqual(result["extracted_value"], "OTP-1234")
         self.assertEqual(self.executor.context["vars"]["otp"], "OTP-1234")
+
+    def test_webhook_request_step_stores_reply_text_and_response(self) -> None:
+        runtime = self._runtime("webhook_request")
+
+        class FakeWebhookResponse:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with mock.patch("automation_studio.automation.engine.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = FakeWebhookResponse(
+                200,
+                json.dumps({"success": True, "reply_text": "ตอบกลับอัตโนมัติ"}).encode("utf-8"),
+            )
+            result = self.executor.execute_step(
+                runtime["step"],
+                {
+                    "url": "https://example.com/webhook/reply",
+                    "method": "POST",
+                    "headers_json": '{"Content-Type":"application/json"}',
+                    "payload_json": '{"incoming_comment":"hello"}',
+                    "timeout_seconds": 15,
+                    "save_response_to": "webhook_response",
+                    "reply_text_field": "reply_text",
+                    "reply_text_variable": "reply_text",
+                },
+                runtime,
+            )
+
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(result["reply_text"], "ตอบกลับอัตโนมัติ")
+        self.assertEqual(self.executor.context["vars"]["reply_text"], "ตอบกลับอัตโนมัติ")
+        self.assertEqual(
+            self.executor.context["vars"]["webhook_response"],
+            {"success": True, "reply_text": "ตอบกลับอัตโนมัติ"},
+        )
+        self.assertTrue(self.executor.context["vars"]["webhook_success"])
+        self.assertEqual(self.executor.context["vars"]["webhook_status_code"], 200)
+
+    def test_webhook_request_step_allows_followup_set_text(self) -> None:
+        webhook_runtime = self._runtime("webhook_request", position=1)
+        set_text_runtime = self._runtime("set_text", position=2)
+        selector = self.device.register_xpath("//comment_input", FakeSelector())
+
+        class FakeWebhookResponse:
+            def __init__(self, status: int, body: bytes) -> None:
+                self.status = status
+                self._body = body
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with mock.patch("automation_studio.automation.engine.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = FakeWebhookResponse(
+                200,
+                json.dumps({"reply_text": "ขอบคุณมากค่ะ"}).encode("utf-8"),
+            )
+            webhook_result = self.executor.execute_step(
+                webhook_runtime["step"],
+                {
+                    "url": "https://example.com/webhook/reply",
+                    "method": "POST",
+                    "headers_json": '{"Content-Type":"application/json"}',
+                    "payload_json": '{"incoming_comment":"สนใจ"}',
+                    "timeout_seconds": 15,
+                    "save_response_to": "webhook_response",
+                    "reply_text_field": "reply_text",
+                    "reply_text_variable": "reply_text",
+                },
+                webhook_runtime,
+            )
+
+        self.assertEqual(webhook_result["reply_text"], "ขอบคุณมากค่ะ")
+        resolved_set_text_parameters = self.executor._resolve_step_parameters(
+            "set_text",
+            {"xpath": "//comment_input", "text": "${vars.get('reply_text')}", "clear_first": True},
+            set_text_runtime["step"],
+            set_text_runtime,
+        )
+        set_text_result = self.executor.execute_step(
+            set_text_runtime["step"],
+            resolved_set_text_parameters,
+            set_text_runtime,
+        )
+
+        self.assertEqual(set_text_result["text_length"], len("ขอบคุณมากค่ะ"))
+        self.assertEqual(selector.set_text_calls, ["ขอบคุณมากค่ะ"])
 
     def test_chance_gate_step(self) -> None:
         runtime = self._runtime("chance_gate", position=5)

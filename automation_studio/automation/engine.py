@@ -37,6 +37,7 @@ class WorkflowExecutor:
         watcher_telemetry_service: Any | None = None,
         switch_account_handler: Any | None = None,
         run_for_each_account_handler: Any | None = None,
+        run_workflow_handler: Any | None = None,
         prepare_upload_context_handler: Any | None = None,
         shared_context: dict[str, Any] | None = None,
         external_stop_checker: Any | None = None,
@@ -50,6 +51,7 @@ class WorkflowExecutor:
         self.watcher_telemetry_service = watcher_telemetry_service
         self.switch_account_handler = switch_account_handler
         self.run_for_each_account_handler = run_for_each_account_handler
+        self.run_workflow_handler = run_workflow_handler
         self.prepare_upload_context_handler = prepare_upload_context_handler
         self.external_stop_checker = external_stop_checker
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -242,6 +244,7 @@ class WorkflowExecutor:
             "scroll_to_selector": self._scroll_to_selector,
             "switch_account": self._switch_account,
             "run_for_each_account": self._run_for_each_account,
+            "run_workflow": self._run_workflow,
             "prepare_upload_context": self._prepare_upload_context,
             "download_video_asset": self._download_video_asset,
             "push_file_to_device": self._push_file_to_device,
@@ -258,6 +261,7 @@ class WorkflowExecutor:
             "branch_on_exists": self._branch_on_exists,
             "set_variable": self._set_variable,
             "extract_text": self._extract_text,
+            "webhook_request": self._webhook_request,
             "chance_gate": self._chance_gate,
             "loop_until_elapsed": self._loop_until_elapsed,
             "conditional_jump": self._conditional_jump,
@@ -1292,6 +1296,11 @@ class WorkflowExecutor:
             raise RuntimeError("run_for_each_account is not configured for this runtime")
         return self.run_for_each_account_handler(self, parameters, runtime)
 
+    def _run_workflow(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        if not self.run_workflow_handler:
+            raise RuntimeError("run_workflow is not configured for this runtime")
+        return self.run_workflow_handler(self, parameters, runtime)
+
     def _prepare_upload_context(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         if not self.prepare_upload_context_handler:
             raise RuntimeError("prepare_upload_context is not configured for this runtime")
@@ -1761,6 +1770,68 @@ class WorkflowExecutor:
         self.context["vars"][variable_name] = extracted_value
         return {"variable_name": variable_name, "source": source, "extracted_value": extracted_value}
 
+    def _webhook_request(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+        url = str(parameters.get("url", "") or "").strip()
+        if not url:
+            raise RuntimeError("webhook_request requires url")
+
+        method = str(parameters.get("method", "POST") or "POST").strip().upper()
+        headers = self._parse_json_object(parameters.get("headers_json"), field_name="headers_json")
+        payload_text = str(parameters.get("payload_json", "") or "").strip()
+        payload: Any = None
+        request_data: bytes | None = None
+        if payload_text:
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Payload JSON must be valid JSON: {exc}") from exc
+            request_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
+
+        timeout_seconds = float(parameters.get("timeout_seconds", 30) or 30)
+        request = Request(url, data=request_data, headers=headers, method=method)
+        with urlopen(request, timeout=timeout_seconds) as response:
+            status_value = getattr(response, "status", None)
+            if status_value is None:
+                getcode = getattr(response, "getcode", None)
+                status_value = getcode() if callable(getcode) else 200
+            status_code = int(status_value)
+            response_bytes = response.read()
+
+        response_text = response_bytes.decode("utf-8", errors="replace")
+        try:
+            response_body: Any = json.loads(response_text) if response_text.strip() else {}
+        except json.JSONDecodeError:
+            response_body = response_text
+
+        save_response_to = str(parameters.get("save_response_to", "webhook_response") or "webhook_response").strip()
+        if save_response_to:
+            self.context["vars"][save_response_to] = response_body
+
+        self.context["vars"]["webhook_status_code"] = status_code
+        self.context["vars"]["webhook_success"] = 200 <= status_code < 300
+
+        reply_text_field = str(parameters.get("reply_text_field", "reply_text") or "reply_text").strip()
+        reply_text_variable = str(parameters.get("reply_text_variable", "reply_text") or "reply_text").strip()
+        reply_text = ""
+        if isinstance(response_body, dict):
+            candidate = response_body.get(reply_text_field, "")
+            reply_text = "" if candidate is None else str(candidate)
+        elif isinstance(response_body, str):
+            reply_text = response_body
+        if reply_text_variable:
+            self.context["vars"][reply_text_variable] = reply_text
+
+        return {
+            "url": url,
+            "method": method,
+            "status_code": status_code,
+            "response_variable": save_response_to,
+            "reply_text_variable": reply_text_variable,
+            "reply_text": reply_text,
+            "response_body": response_body,
+        }
+
     def _chance_gate(self, parameters: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
         probability_percent = float(parameters.get("probability_percent", 0))
         roll_percent = random.uniform(0, 100)
@@ -1819,6 +1890,18 @@ class WorkflowExecutor:
             "jump_to_position": target_position if should_jump else None,
             "did_jump": should_jump,
         }
+
+    def _parse_json_object(self, raw_value: Any, *, field_name: str) -> dict[str, str]:
+        raw_text = str(raw_value or "").strip()
+        if not raw_text:
+            return {}
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{field_name} must be valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"{field_name} must be a JSON object")
+        return {str(key): "" if value is None else str(value) for key, value in parsed.items()}
 
     def _read_target_value(self, target_type: str | None, target: Any, source: str) -> Any:
         if source == "info_json":

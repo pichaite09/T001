@@ -701,6 +701,26 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="run_workflow",
+        label="Run Workflow",
+        description="Run another workflow as a nested workflow, then continue with the next step in the current workflow.",
+        template={
+            "target_workflow_id": 1,
+        },
+        fields=(
+            StepField("target_workflow_id", "Target Workflow ID", field_type="int", default=1, required=True, min_value=1),
+        ),
+        presets=(
+            StepPreset(
+                "Run Nested Workflow",
+                "Execute another workflow on the current device and continue when it finishes.",
+                {
+                    "target_workflow_id": 1,
+                },
+            ),
+        ),
+    ),
+    StepDefinition(
         key="prepare_upload_context",
         label="Prepare Upload Context",
         description="Load the selected upload job into workflow context so later steps can use upload fields and local vars.",
@@ -1008,6 +1028,65 @@ STEP_DEFINITIONS = [
         ),
     ),
     StepDefinition(
+        key="webhook_request",
+        label="Webhook Request",
+        description="Send workflow data to a webhook, wait for the response, and store the parsed result in workflow variables.",
+        template={
+            "url": "https://example.com/webhook/reply",
+            "method": "POST",
+            "headers_json": "{\"Content-Type\": \"application/json\"}",
+            "payload_json": "{\"incoming_comment\": ${json.dumps(vars.get('incoming_comment'))}}",
+            "timeout_seconds": 30,
+            "save_response_to": "webhook_response",
+            "reply_text_field": "reply_text",
+            "reply_text_variable": "reply_text",
+        },
+        fields=(
+            StepField("url", "URL", required=True, placeholder="https://example.com/webhook/reply"),
+            StepField(
+                "method",
+                "Method",
+                field_type="combo",
+                default="POST",
+                options=(("POST", "POST"), ("GET", "GET"), ("PUT", "PUT"), ("PATCH", "PATCH")),
+            ),
+            StepField(
+                "headers_json",
+                "Headers JSON",
+                field_type="textarea",
+                default='{"Content-Type": "application/json"}',
+                placeholder='{"Authorization": "Bearer ..."}',
+            ),
+            StepField(
+                "payload_json",
+                "Payload JSON",
+                field_type="textarea",
+                default="{\"incoming_comment\": ${json.dumps(vars.get('incoming_comment'))}}",
+                placeholder='{"incoming_comment": ${json.dumps(vars.get("incoming_comment"))}}',
+            ),
+            StepField("timeout_seconds", "Timeout (sec)", field_type="float", default=30.0, min_value=1, decimals=1),
+            StepField("save_response_to", "Save Response To", default="webhook_response", placeholder="webhook_response"),
+            StepField("reply_text_field", "Reply Text Field", default="reply_text", placeholder="reply_text"),
+            StepField("reply_text_variable", "Reply Text Variable", default="reply_text", placeholder="reply_text"),
+        ),
+        presets=(
+            StepPreset(
+                "Reply Webhook",
+                "Send the current incoming comment to a webhook and store reply_text for the next step.",
+                {
+                    "url": "https://example.com/webhook/reply",
+                    "method": "POST",
+                    "headers_json": "{\"Content-Type\": \"application/json\"}",
+                    "payload_json": "{\"incoming_comment\": ${json.dumps(vars.get('incoming_comment'))}}",
+                    "timeout_seconds": 30,
+                    "save_response_to": "webhook_response",
+                    "reply_text_field": "reply_text",
+                    "reply_text_variable": "reply_text",
+                },
+            ),
+        ),
+    ),
+    StepDefinition(
         key="chance_gate",
         label="Chance Gate",
         description="Randomly decide whether to continue, skip the next steps, or jump to another position.",
@@ -1297,6 +1376,11 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         if target_workflow_id is not None and target_workflow_id < 1:
             errors.append("Target Workflow ID must be greater than or equal to 1")
 
+    if step_type == "run_workflow":
+        target_workflow_id = _safe_int(parameters.get("target_workflow_id"), "Target Workflow ID", errors)
+        if target_workflow_id is not None and target_workflow_id < 1:
+            errors.append("Target Workflow ID must be greater than or equal to 1")
+
     if step_type == "prepare_upload_context":
         upload_job_id = _safe_int(parameters.get("upload_job_id", 0) or 0, "Upload Job ID", errors)
         if upload_job_id is not None and upload_job_id < 0:
@@ -1391,6 +1475,37 @@ def validate_step_parameters(step_type: str, parameters: dict[str, Any]) -> list
         source = str(parameters.get("source", "text") or "text").strip()
         if source not in {"text", "content_desc", "resource_id", "class_name", "info_json"}:
             errors.append("Source must be text, content_desc, resource_id, class_name, or info_json")
+
+    if step_type == "webhook_request":
+        if not str(parameters.get("url", "")).strip():
+            errors.append("URL is required")
+        method = str(parameters.get("method", "POST") or "POST").strip().upper()
+        if method not in {"POST", "GET", "PUT", "PATCH"}:
+            errors.append("Method must be POST, GET, PUT, or PATCH")
+        timeout_seconds = _safe_float(parameters.get("timeout_seconds", 30), "Timeout", errors)
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            errors.append("Timeout must be greater than 0")
+        headers_json = str(parameters.get("headers_json", "") or "").strip()
+        if headers_json and "${" not in headers_json:
+            try:
+                parsed_headers = json.loads(headers_json)
+            except json.JSONDecodeError:
+                errors.append("Headers JSON must be valid JSON")
+            else:
+                if not isinstance(parsed_headers, dict):
+                    errors.append("Headers JSON must be a JSON object")
+        payload_json = str(parameters.get("payload_json", "") or "").strip()
+        if payload_json and "${" not in payload_json:
+            try:
+                json.loads(payload_json)
+            except json.JSONDecodeError:
+                errors.append("Payload JSON must be valid JSON")
+        save_response_to = str(parameters.get("save_response_to", "") or "").strip()
+        if save_response_to and not _valid_variable_name(save_response_to):
+            errors.append("Save Response To must start with a letter or underscore and contain only letters, numbers, or underscores")
+        reply_text_variable = str(parameters.get("reply_text_variable", "") or "").strip()
+        if reply_text_variable and not _valid_variable_name(reply_text_variable):
+            errors.append("Reply Text Variable must start with a letter or underscore and contain only letters, numbers, or underscores")
 
     if step_type == "conditional_jump":
         if not str(parameters.get("expression", "")).strip():
