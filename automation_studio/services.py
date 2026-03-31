@@ -1600,18 +1600,30 @@ class WorkflowService:
         self.runtime_repository.touch_task(str(task_id))
         return self.runtime_repository.task_control(task_id)
 
+    def _build_runtime_task_id(
+        self,
+        executor: WorkflowExecutor,
+        *,
+        workflow_id: int,
+        device_id: int,
+    ) -> str:
+        return (
+            f"workflow-runtime:{executor.run_id}:"
+            f"{int(workflow_id)}:{int(device_id)}:{os.getpid()}:{threading.get_ident()}:{time.time_ns()}"
+        )
+
     def _register_active_executor(
         self,
         device_id: int,
         executor: WorkflowExecutor,
         *,
+        task_id: str,
         workflow: dict[str, Any],
         device_record: dict[str, Any],
         execution_scope: str,
         context_metadata: dict[str, Any],
     ) -> None:
         source = "upload" if context_metadata.get("upload_job_id") else "schedule" if context_metadata.get("schedule_id") else "workflow"
-        task_id = f"workflow-runtime:{executor.run_id}"
         detail = (
             f"Upload job #{int(context_metadata.get('upload_job_id') or 0)}"
             if source == "upload"
@@ -2349,7 +2361,7 @@ class WorkflowService:
             shared_context=shared_context,
             external_stop_checker=None,
         )
-        runtime_task_id = f"workflow-runtime:{executor.run_id}"
+        runtime_task_id = self._build_runtime_task_id(executor, workflow_id=int(workflow["id"]), device_id=int(device_id))
         if self.runtime_repository:
             executor.external_stop_checker = lambda task_id=runtime_task_id: self._runtime_task_control(task_id)
 
@@ -2364,6 +2376,7 @@ class WorkflowService:
         self._register_active_executor(
             int(device_id),
             executor,
+            task_id=runtime_task_id,
             workflow=workflow,
             device_record=device_record,
             execution_scope=execution_scope,

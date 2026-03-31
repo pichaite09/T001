@@ -267,6 +267,59 @@ class ServicePhase4Tests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task["status"], "stopped")
 
+    def test_register_active_executor_uses_unique_task_ids_for_same_run_id(self) -> None:
+        workflow_id = self.service.save_workflow(None, "Concurrent Runtime Workflow", "", True)
+        device_one_id = self.device_repository.upsert_device(None, "Phone A", "SERIAL1", "")
+        device_two_id = self.device_repository.upsert_device(None, "Phone B", "SERIAL2", "")
+        workflow = self.workflow_repository.get_workflow(workflow_id)
+        device_one = self.device_repository.get_device(device_one_id)
+        device_two = self.device_repository.get_device(device_two_id)
+
+        self.assertIsNotNone(workflow)
+        self.assertIsNotNone(device_one)
+        self.assertIsNotNone(device_two)
+
+        class StubExecutor:
+            def __init__(self, run_id: str) -> None:
+                self.run_id = run_id
+                self.context = {"run": {"started_at": "2026-03-31 14:30:00"}}
+
+            def request_stop(self, reason: str) -> None:
+                return None
+
+        executor_one = StubExecutor("20260331_143000")
+        executor_two = StubExecutor("20260331_143000")
+        task_id_one = self.service._build_runtime_task_id(executor_one, workflow_id=workflow_id, device_id=device_one_id)
+        task_id_two = self.service._build_runtime_task_id(executor_two, workflow_id=workflow_id, device_id=device_two_id)
+
+        self.assertNotEqual(task_id_one, task_id_two)
+
+        self.service._register_active_executor(
+            device_one_id,
+            executor_one,
+            task_id=task_id_one,
+            workflow=workflow,
+            device_record=device_one,
+            execution_scope="workflow",
+            context_metadata={"runtime_source": "test_service"},
+        )
+        self.service._register_active_executor(
+            device_two_id,
+            executor_two,
+            task_id=task_id_two,
+            workflow=workflow,
+            device_record=device_two,
+            execution_scope="workflow",
+            context_metadata={"runtime_source": "test_service"},
+        )
+
+        tasks = self.service.list_active_runtime_tasks()
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({int(task["device_id"]) for task in tasks}, {device_one_id, device_two_id})
+
+        self.service._unregister_active_executor(device_one_id, executor_one)
+        self.service._unregister_active_executor(device_two_id, executor_two)
+
     def test_switch_account_step_runs_platform_switch_workflow_and_updates_current_account(self) -> None:
         device_id = self.device_repository.upsert_device(None, "Phone", "SERIAL1", "")
         switch_workflow_id = self.service.save_workflow(None, "Shopee Switch", "", True)
